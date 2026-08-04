@@ -15,10 +15,12 @@ import { alignedImageMarkdown, audioMarkdown } from "./markdown";
 import {
   clearConflictPath,
   getSyncBadgeState,
+  listPublishCandidates,
   normalizePublishStatusForType,
+  publishSelected,
   pullCurrentNote,
-  publishFile,
   upsertCatalogCategory,
+  type PublishCandidate,
   type SyncBadgeState,
 } from "./sync";
 import type { BackdropSettings, WorldCatalogMeta } from "./types";
@@ -893,8 +895,8 @@ export class ResolveSyncModal extends Modal {
       contentEl.createEl("p", {
         text:
           this.state === "conflict"
-            ? "Remote changed while you have local edits. Keep local, take remote, or sync local (choose status before push)."
-            : "Local edits not yet pushed. Keep working, take remote (overwrite), or sync local (choose status before push).",
+            ? "Remote changed while you have local edits. Keep local, take remote, or open Sync to push local (force)."
+            : "Local edits not yet pushed. Keep working, take remote (overwrite), or open Sync to push local (force).",
         cls: "setting-item-description",
       });
 
@@ -951,18 +953,17 @@ export class ResolveSyncModal extends Modal {
 
     new Setting(contentEl)
       .setName("Sync local (force)")
-      .setDesc("Choose status, then overwrite remote with this note.")
+      .setDesc("Open the Sync panel to overwrite remote with this note.")
       .addButton((btn) =>
         btn.setButtonText("Sync local…").setCta().onClick(() => {
           this.close();
-          new SyncConfirmModal(
+          new SyncPanelModal(
             this.app,
-            this.file,
             this.settings,
             this.saveSettings,
             this.client,
             this.slugIndex,
-            { force: true, onDone: () => this.onAfter() }
+            { force: true, focusFile: this.file, onDone: () => this.onAfter() }
           ).open();
         })
       );
@@ -973,144 +974,266 @@ export class ResolveSyncModal extends Modal {
   }
 }
 
+interface SyncRowState {
+  candidate: PublishCandidate;
+  checked: boolean;
+  status: string;
+  discordSyncEnabled: boolean;
+}
+
 /**
- * Pre-sync confirmation (Obsidian Sync–panel inspired).
- * Choose visibility status before pushing; Sync ≠ “set published”.
+ * Obsidian Sync–style panel: checklist of push candidates with per-row status / Discord.
+ * Cancel closes without pushing; Push selected syncs checked notes sequentially.
  */
-export class SyncConfirmModal extends Modal {
-  private titleText = "";
-  private world = "";
-  private type = "wiki";
-  private status = "draft";
-  private articleSource = "";
-  private discordSyncEnabled = false;
-  private showDiscord = false;
+export class SyncPanelModal extends Modal {
+  private rows: SyncRowState[] = [];
+  private loading = true;
   private busy = false;
+  private focusPath = "";
+  private statusEl: HTMLElement | null = null;
 
   constructor(
     app: App,
-    private file: TFile,
     private settings: BackdropSettings,
     private saveSettings: () => Promise<void>,
     private client: BackdropClient,
     private slugIndex: WikiSlugIndex,
-    private opts: { force?: boolean; onDone?: () => void } = {}
+    private opts: {
+      force?: boolean;
+      /** Pre-check and scroll to this note (included even if clean). */
+      focusFile?: TFile | null;
+      onDone?: () => void;
+    } = {}
   ) {
     super(app);
+    this.focusPath = opts.focusFile ? normalizePath(opts.focusFile.path) : "";
   }
 
   async onOpen() {
-    const content = await this.app.vault.read(this.file);
-    const { data } = splitFrontmatter(content);
-    this.type = String(data.backdrop_type || "");
-    this.world = String(data.backdrop_world || "").trim();
-    this.titleText = String(data.title || this.file.basename).trim() || this.file.basename;
-    this.status = normalizePublishStatusForType(this.type, data.status);
-    this.articleSource = String(data.backdrop_source || "").trim();
-    this.showDiscord = this.type === "wiki" && this.articleSource !== "pin";
-    this.discordSyncEnabled = this.showDiscord
-      ? data.discord_sync_enabled === true || data.discord_sync_enabled === "true"
-      : false;
+    this.modalEl.addClass("bd-sync-panel-modal");
+    this.render();
+    try {
+      const candidates = await listPublishCandidates(this.app, this.settings, {
+        includePath: this.focusPath || undefined,
+      });
+      this.rows = candidates.map((c) => ({
+        candidate: c,
+        checked: c.defaultChecked,
+        status: c.status,
+        discordSyncEnabled: c.discordSyncEnabled,
+      }));
+    } catch (e) {
+      noticeError(e);
+      this.rows = [];
+    }
+    this.loading = false;
+    this.render();
+  }
 
-    if (this.type !== "wiki" && this.type !== "timeline") {
-      new Notice("BackDrop: note is missing backdrop_type (wiki/timeline).");
-      this.close();
-      return;
-    }
-    if (!this.world) {
-      new Notice("BackDrop: note is missing backdrop_world.");
-      this.close();
-      return;
-    }
+  private checkedCount(): number {
+    return this.rows.filter((r) => r.checked).length;
+  }
+
+  private setAllChecked(on: boolean) {
+    for (const row of this.rows) row.checked = on;
     this.render();
   }
 
   private render() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.addClass("bd-sync-confirm");
+    contentEl.addClass("bd-sync-panel");
 
     contentEl.createEl("h2", { text: "Sync to BackDrop" });
     contentEl.createEl("p", {
-      text: "Push this note to BackDrop. Status controls visibility — Sync does not mean Published.",
+      text: this.opts.force
+        ? "Force-push selected notes (overwrite remote). Status controls visibility — Sync does not mean Published."
+        : "Choose notes to push. Status controls visibility — Sync does not mean Published.",
       cls: "setting-item-description",
     });
 
-    const meta = contentEl.createDiv({ cls: "bd-sync-confirm-meta" });
-    const rows: Array<[string, string]> = [
-      ["Note", this.titleText],
-      ["World", this.world],
-      ["Type", this.type === "timeline" ? "Timeline" : "Wiki"],
-    ];
-    if (this.opts.force) {
-      rows.push(["Mode", "Force (overwrite remote)"]);
-    }
-    for (const [label, value] of rows) {
-      const row = meta.createDiv({ cls: "bd-sync-confirm-row" });
-      row.createSpan({ text: label, cls: "bd-sync-confirm-label" });
-      row.createSpan({ text: value, cls: "bd-sync-confirm-value" });
+    if (this.loading) {
+      contentEl.createEl("p", { text: "Scanning vault…", cls: "setting-item-description" });
+      return;
     }
 
-    const statusOptions =
-      this.type === "timeline"
-        ? [
-            ["draft", "Draft"],
-            ["published", "Published"],
-          ]
-        : [
-            ["draft", "Draft"],
-            ["unlisted", "Unlisted"],
-            ["published", "Published"],
-          ];
+    if (!this.rows.length) {
+      contentEl.createEl("p", {
+        text: "Nothing to sync",
+        cls: "bd-sync-panel-empty",
+      });
+      contentEl.createEl("p", {
+        text: "No dirty, unpublished, or conflict notes under the vault root.",
+        cls: "setting-item-description",
+      });
+      new Setting(contentEl).addButton((btn) =>
+        btn.setButtonText("Close").onClick(() => this.close())
+      );
+      return;
+    }
 
-    new Setting(contentEl)
-      .setName("Status")
-      .setDesc("Visibility on BackDrop after this sync.")
-      .addDropdown((dd) => {
-        for (const [value, label] of statusOptions) dd.addOption(value, label);
-        dd.setValue(this.status).onChange((v) => {
-          this.status = normalizePublishStatusForType(this.type, v);
-        });
+    const toolbar = contentEl.createDiv({ cls: "bd-sync-panel-toolbar" });
+    new Setting(toolbar)
+      .setName(`${this.checkedCount()} selected`)
+      .setDesc(`${this.rows.length} candidate${this.rows.length === 1 ? "" : "s"}`)
+      .addButton((btn) =>
+        btn.setButtonText("Select all").onClick(() => this.setAllChecked(true))
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Select none").onClick(() => this.setAllChecked(false))
+      );
+
+    const list = contentEl.createDiv({ cls: "bd-sync-panel-list" });
+    let focusRowEl: HTMLElement | null = null;
+
+    for (const row of this.rows) {
+      const c = row.candidate;
+      const el = list.createDiv({ cls: "bd-sync-panel-row" });
+      if (this.focusPath && c.path === this.focusPath) {
+        el.addClass("bd-sync-panel-row--focus");
+        focusRowEl = el;
+      }
+
+      const head = el.createDiv({ cls: "bd-sync-panel-row-head" });
+      const check = head.createEl("input", {
+        type: "checkbox",
+        cls: "bd-sync-panel-check",
+      });
+      check.checked = row.checked;
+      check.addEventListener("change", () => {
+        row.checked = check.checked;
+        this.updateSelectionLabel();
       });
 
-    if (this.showDiscord) {
-      new Setting(contentEl)
-        .setName("Publish to Discord")
-        .setDesc("When status is Published, sync this article to your Discord forum.")
-        .addToggle((toggle) => {
-          toggle.setValue(this.discordSyncEnabled).onChange((on) => {
-            this.discordSyncEnabled = on;
+      const meta = head.createDiv({ cls: "bd-sync-panel-row-meta" });
+      meta.createDiv({ text: c.title, cls: "bd-sync-panel-title" });
+      meta.createDiv({
+        text: `${c.world} · ${c.type === "timeline" ? "Timeline" : "Wiki"}`,
+        cls: "bd-sync-panel-sub",
+      });
+
+      const hints = head.createDiv({ cls: "bd-sync-panel-hints" });
+      const hintCls =
+        c.hint === "Conflict"
+          ? "bd-sync-hint--conflict"
+          : c.hint === "New"
+            ? "bd-sync-hint--new"
+            : c.hint === "Dirty"
+              ? "bd-sync-hint--dirty"
+              : "bd-sync-hint--clean";
+      hints.createSpan({ text: c.hint, cls: `bd-sync-hint ${hintCls}` });
+      if (c.localDiffers) {
+        hints.createSpan({ text: "Local differs", cls: "bd-sync-hint bd-sync-hint--differs" });
+      } else if (!c.conflict) {
+        hints.createSpan({ text: "Matches last sync", cls: "bd-sync-hint bd-sync-hint--same" });
+      }
+
+      const controls = el.createDiv({ cls: "bd-sync-panel-row-controls" });
+      const statusOptions =
+        c.type === "timeline"
+          ? [
+              ["draft", "Draft"],
+              ["published", "Published"],
+            ]
+          : [
+              ["draft", "Draft"],
+              ["unlisted", "Unlisted"],
+              ["published", "Published"],
+            ];
+
+      new Setting(controls)
+        .setName("Status")
+        .addDropdown((dd) => {
+          for (const [value, label] of statusOptions) dd.addOption(value, label);
+          dd.setValue(row.status).onChange((v) => {
+            row.status = normalizePublishStatusForType(c.type, v);
           });
         });
+
+      if (c.showDiscord) {
+        new Setting(controls)
+          .setName("Discord")
+          .setDesc("Publish to Discord when status is Published")
+          .addToggle((toggle) => {
+            toggle.setValue(row.discordSyncEnabled).onChange((on) => {
+              row.discordSyncEnabled = on;
+            });
+          });
+      }
     }
+
+    this.statusEl = contentEl.createDiv({ cls: "bd-sync-panel-footer-status" });
+    this.updateSelectionLabel();
 
     new Setting(contentEl)
       .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => {
-          this.close();
+        btn.setButtonText("Cancel").setDisabled(this.busy).onClick(() => {
+          if (!this.busy) this.close();
         })
       )
       .addButton((btn) =>
         btn
-          .setButtonText(this.opts.force ? "Force sync" : "Sync to BackDrop")
+          .setButtonText(
+            this.opts.force
+              ? `Force push selected (${this.checkedCount()})`
+              : `Push selected (${this.checkedCount()})`
+          )
           .setCta()
-          .setDisabled(this.busy)
+          .setDisabled(this.busy || this.checkedCount() === 0)
           .onClick(() => {
-            void this.confirm();
+            void this.pushSelected();
           })
       );
+
+    if (focusRowEl) {
+      window.setTimeout(() => {
+        focusRowEl?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }, 50);
+    }
   }
 
-  private async confirm() {
+  private updateSelectionLabel() {
+    const n = this.checkedCount();
+    if (this.statusEl) {
+      this.statusEl.setText(
+        n === 0
+          ? "Select at least one note to push."
+          : `${n} note${n === 1 ? "" : "s"} will be pushed.`
+      );
+    }
+    const buttons = this.contentEl.querySelectorAll("button.mod-cta");
+    const lastCta = buttons[buttons.length - 1] as HTMLButtonElement | undefined;
+    if (lastCta) {
+      lastCta.disabled = this.busy || n === 0;
+      lastCta.setText(
+        this.opts.force ? `Force push selected (${n})` : `Push selected (${n})`
+      );
+    }
+  }
+
+  private async pushSelected() {
     if (this.busy) return;
+    const selected = this.rows.filter((r) => r.checked);
+    if (!selected.length) {
+      new Notice("BackDrop: select at least one note.");
+      return;
+    }
     this.busy = true;
     this.render();
     try {
-      await this.writeChoicesIfNeeded();
-      await publishFile(this.app, this.client, this.file, this.settings, this.saveSettings, {
-        force: this.opts.force === true,
-        slugIndex: this.slugIndex,
-      });
+      await publishSelected(
+        this.app,
+        this.client,
+        this.settings,
+        this.saveSettings,
+        selected.map((r) => ({
+          file: r.candidate.file,
+          status: r.status,
+          discordSyncEnabled: r.candidate.showDiscord ? r.discordSyncEnabled : undefined,
+          force: this.opts.force === true,
+        })),
+        this.slugIndex
+      );
       this.close();
       this.opts.onDone?.();
     } catch (e) {
@@ -1120,72 +1243,27 @@ export class SyncConfirmModal extends Modal {
     }
   }
 
-  /** Persist status / discord flag into frontmatter before publishFile reads them. */
-  private async writeChoicesIfNeeded() {
-    const latest = await this.app.vault.read(this.file);
-    const parsed = splitFrontmatter(latest);
-    const currentStatus = normalizePublishStatusForType(this.type, parsed.data.status);
-    const currentDiscord =
-      this.showDiscord &&
-      (parsed.data.discord_sync_enabled === true || parsed.data.discord_sync_enabled === "true");
-    const statusChanged = currentStatus !== this.status;
-    const discordChanged = this.showDiscord && currentDiscord !== this.discordSyncEnabled;
-    if (!statusChanged && !discordChanged) return;
-
-    const fm: Record<string, unknown> = { ...parsed.data, status: this.status };
-    if (this.showDiscord) fm.discord_sync_enabled = this.discordSyncEnabled;
-    const next = buildNoteFile(fm, parsed.body);
-    await this.app.vault.modify(this.file, next);
-    // Leave hash dirty so pull still skips overwrite until sync completes.
-  }
-
   onClose() {
     this.contentEl.empty();
   }
 }
 
-/** Bulk pending sync: confirm count, keep each note’s frontmatter status. */
-export class BulkSyncConfirmModal extends Modal {
+/** @deprecated Use SyncPanelModal. Thin wrapper for older call sites. */
+export class SyncConfirmModal extends SyncPanelModal {
   constructor(
     app: App,
-    private pendingCount: number,
-    private onConfirm: () => void | Promise<void>
+    file: TFile,
+    settings: BackdropSettings,
+    saveSettings: () => Promise<void>,
+    client: BackdropClient,
+    slugIndex: WikiSlugIndex,
+    opts: { force?: boolean; onDone?: () => void } = {}
   ) {
-    super(app);
-  }
-
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.addClass("bd-sync-confirm");
-    contentEl.createEl("h2", { text: "Sync pending notes" });
-    contentEl.createEl("p", {
-      text: `Push ${this.pendingCount} note${this.pendingCount === 1 ? "" : "s"} with their current statuses?`,
-      cls: "setting-item-description",
+    super(app, settings, saveSettings, client, slugIndex, {
+      force: opts.force,
+      focusFile: file,
+      onDone: opts.onDone,
     });
-    contentEl.createEl("p", {
-      text: "Each note keeps its frontmatter status (draft / unlisted / published). Open Sync on a single note to change status first.",
-      cls: "setting-item-description",
-    });
-    new Setting(contentEl)
-      .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => {
-          this.close();
-        })
-      )
-      .addButton((btn) =>
-        btn
-          .setButtonText(`Sync ${this.pendingCount} notes`)
-          .setCta()
-          .onClick(async () => {
-            this.close();
-            await this.onConfirm();
-          })
-      );
-  }
-
-  onClose() {
-    this.contentEl.empty();
   }
 }
 

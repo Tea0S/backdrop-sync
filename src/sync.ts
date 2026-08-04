@@ -1239,25 +1239,210 @@ export async function publishFile(
   );
 }
 
+/** Hint shown in the Sync panel for why a note is a push candidate. */
+export type PublishCandidateHint = "Dirty" | "New" | "Conflict" | "Clean";
+
+export interface PublishCandidate {
+  file: TFile;
+  path: string;
+  title: string;
+  world: string;
+  type: "wiki" | "timeline";
+  status: string;
+  discordSyncEnabled: boolean;
+  showDiscord: boolean;
+  /** True when local content hash differs from last pull/publish. */
+  dirty: boolean;
+  unpublished: boolean;
+  conflict: boolean;
+  /** Local differs from last-synced snapshot (hash) or has never been published. */
+  localDiffers: boolean;
+  hint: PublishCandidateHint;
+  /** Default checkbox when opening the panel. */
+  defaultChecked: boolean;
+}
+
+/**
+ * Notes under vault root that are candidates to push:
+ * dirty vs last sync, unpublished (no backdrop_id), and/or conflict-flagged.
+ * Optionally force-include a focus note even when clean.
+ */
+export async function listPublishCandidates(
+  app: App,
+  settings: BackdropSettings,
+  opts: { includePath?: string } = {}
+): Promise<PublishCandidate[]> {
+  const root = settings.vaultRoot.replace(/\/+$/, "");
+  const includeNorm = opts.includePath ? normalizePath(opts.includePath) : "";
+  const conflictSet = new Set((settings.conflictPaths || []).map((p) => normalizePath(p)));
+  const out: PublishCandidate[] = [];
+
+  for (const file of app.vault.getMarkdownFiles()) {
+    const path = normalizePath(file.path);
+    const underRoot = file.path.startsWith(`${root}/`) || file.path === root;
+    const isFocus = includeNorm !== "" && path === includeNorm;
+    if (!underRoot && !isFocus) continue;
+    const content = await app.vault.read(file);
+    const { data } = splitFrontmatter(content);
+    const typeRaw = String(data.backdrop_type || "");
+    if (typeRaw !== "wiki" && typeRaw !== "timeline") continue;
+    const type = typeRaw as "wiki" | "timeline";
+
+    const dirty = await fileIsDirty(app, file, settings);
+    const id = String(data.backdrop_id || "").trim();
+    const unpublished = !id;
+    const conflict = conflictSet.has(path);
+    if (!dirty && !unpublished && !conflict && !isFocus) continue;
+
+    const articleSource = String(data.backdrop_source || "").trim();
+    const showDiscord = type === "wiki" && articleSource !== "pin";
+    const discordSyncEnabled = showDiscord
+      ? data.discord_sync_enabled === true || data.discord_sync_enabled === "true"
+      : false;
+
+    const hint: PublishCandidateHint = conflict
+      ? "Conflict"
+      : unpublished
+        ? "New"
+        : dirty
+          ? "Dirty"
+          : "Clean";
+    const localDiffers = dirty || unpublished;
+
+    out.push({
+      file,
+      path,
+      title: String(data.title || file.basename).trim() || file.basename,
+      world: String(data.backdrop_world || "").trim() || "—",
+      type,
+      status: normalizePublishStatusForType(type, data.status),
+      discordSyncEnabled,
+      showDiscord,
+      dirty,
+      unpublished,
+      conflict,
+      localDiffers,
+      hint,
+      // Dirty / New default on; conflict default on; clean focus-only also checked.
+      defaultChecked: isFocus || dirty || unpublished || conflict,
+    });
+  }
+
+  const rank = (c: PublishCandidate) => {
+    if (includeNorm && c.path === includeNorm) return 0;
+    if (c.hint === "Conflict") return 1;
+    if (c.hint === "New") return 2;
+    if (c.hint === "Dirty") return 3;
+    return 4;
+  };
+  out.sort((a, b) => {
+    const d = rank(a) - rank(b);
+    if (d !== 0) return d;
+    return a.title.localeCompare(b.title);
+  });
+
+  return out;
+}
+
 /** Notes that bulk sync would push (dirty or never synced). */
 export async function countPendingPublish(
   app: App,
   settings: BackdropSettings
 ): Promise<number> {
-  const root = settings.vaultRoot.replace(/\/+$/, "");
-  const files = app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(`${root}/`));
-  let pending = 0;
-  for (const file of files) {
-    const content = await app.vault.read(file);
-    const { data } = splitFrontmatter(content);
-    if (data.backdrop_type !== "wiki" && data.backdrop_type !== "timeline") continue;
-    const dirty = await fileIsDirty(app, file, settings);
-    if (!dirty && data.backdrop_id) continue;
-    pending += 1;
-  }
-  return pending;
+  const candidates = await listPublishCandidates(app, settings);
+  return candidates.filter((c) => c.dirty || c.unpublished || c.conflict).length;
 }
 
+export interface PublishSelectionItem {
+  file: TFile;
+  status: string;
+  discordSyncEnabled?: boolean;
+  force?: boolean;
+}
+
+/** Persist status / discord overrides into frontmatter before publishFile reads them. */
+export async function applyPublishChoices(
+  app: App,
+  file: TFile,
+  choices: { status: string; discordSyncEnabled?: boolean; showDiscord?: boolean }
+): Promise<void> {
+  const latest = await app.vault.read(file);
+  const parsed = splitFrontmatter(latest);
+  const type = String(parsed.data.backdrop_type || "");
+  const nextStatus = normalizePublishStatusForType(type, choices.status);
+  const currentStatus = normalizePublishStatusForType(type, parsed.data.status);
+  const showDiscord = choices.showDiscord === true;
+  const currentDiscord =
+    showDiscord &&
+    (parsed.data.discord_sync_enabled === true || parsed.data.discord_sync_enabled === "true");
+  const statusChanged = currentStatus !== nextStatus;
+  const discordChanged =
+    showDiscord && choices.discordSyncEnabled !== undefined && currentDiscord !== choices.discordSyncEnabled;
+  if (!statusChanged && !discordChanged) return;
+
+  const fm: Record<string, unknown> = { ...parsed.data, status: nextStatus };
+  if (showDiscord && choices.discordSyncEnabled !== undefined) {
+    fm.discord_sync_enabled = choices.discordSyncEnabled;
+  }
+  const next = buildNoteFile(fm, parsed.body);
+  await app.vault.modify(file, next);
+  // Leave hash dirty so pull still skips overwrite until sync completes.
+}
+
+/**
+ * Push selected notes sequentially (respects PUBLISH_GAP_MS / rate limits).
+ */
+export async function publishSelected(
+  app: App,
+  client: BackdropClient,
+  settings: BackdropSettings,
+  saveSettings: () => Promise<void>,
+  items: PublishSelectionItem[],
+  slugIndex?: WikiSlugIndex
+): Promise<{ published: number; failed: number; rateLimited: boolean }> {
+  let published = 0;
+  let failed = 0;
+  let rateLimited = false;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const content = await app.vault.read(item.file);
+    const { data } = splitFrontmatter(content);
+    const type = String(data.backdrop_type || "");
+    const articleSource = String(data.backdrop_source || "").trim();
+    const showDiscord = type === "wiki" && articleSource !== "pin";
+    try {
+      await applyPublishChoices(app, item.file, {
+        status: item.status,
+        discordSyncEnabled: item.discordSyncEnabled,
+        showDiscord,
+      });
+      await publishFile(app, client, item.file, settings, saveSettings, {
+        force: item.force === true,
+        slugIndex,
+      });
+      published += 1;
+    } catch (e) {
+      failed += 1;
+      if (e instanceof BackdropApiError && e.status === 429) {
+        rateLimited = true;
+        noticeError(e, `Sync ${item.file.path}`);
+        break;
+      }
+      noticeError(e, `Sync ${item.file.path}`);
+    }
+    if (i + 1 < items.length) await sleepMs(PUBLISH_GAP_MS);
+  }
+
+  new Notice(
+    `BackDrop sync: ${published} pushed` +
+      (failed ? `, ${failed} failed` : "") +
+      (rateLimited ? " (stopped early — rate limited)" : "")
+  );
+  return { published, failed, rateLimited };
+}
+
+/** @deprecated Prefer Sync panel + publishSelected. Kept for scripts. */
 export async function publishPending(
   app: App,
   client: BackdropClient,
@@ -1265,39 +1450,15 @@ export async function publishPending(
   saveSettings: () => Promise<void>,
   slugIndex?: WikiSlugIndex
 ): Promise<void> {
-  const root = settings.vaultRoot.replace(/\/+$/, "");
-  const files = app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(`${root}/`));
-  let published = 0;
-  let skipped = 0;
-  let rateLimited = false;
-  for (const file of files) {
-    const dirty = await fileIsDirty(app, file, settings);
-    const content = await app.vault.read(file);
-    const { data } = splitFrontmatter(content);
-    if (data.backdrop_type !== "wiki" && data.backdrop_type !== "timeline") continue;
-    if (!dirty && data.backdrop_id) {
-      skipped += 1;
-      continue;
-    }
-    try {
-      await publishFile(app, client, file, settings, saveSettings, { slugIndex });
-      published += 1;
-      await sleepMs(PUBLISH_GAP_MS);
-    } catch (e) {
-      if (e instanceof BackdropApiError && e.status === 429) {
-        rateLimited = true;
-        noticeError(e, `Sync ${file.path}`);
-        // Stop bulk sync on rate limit so remaining notes aren't rejected in a storm.
-        break;
-      }
-      noticeError(e, `Sync ${file.path}`);
-      await sleepMs(PUBLISH_GAP_MS);
-    }
-  }
-  new Notice(
-    `BackDrop sync: ${published} pushed, ${skipped} unchanged` +
-      (rateLimited ? " (stopped early — rate limited)" : "")
-  );
+  const candidates = await listPublishCandidates(app, settings);
+  const items: PublishSelectionItem[] = candidates
+    .filter((c) => c.defaultChecked)
+    .map((c) => ({
+      file: c.file,
+      status: c.status,
+      discordSyncEnabled: c.showDiscord ? c.discordSyncEnabled : undefined,
+    }));
+  await publishSelected(app, client, settings, saveSettings, items, slugIndex);
 }
 
 export async function createWikiStub(

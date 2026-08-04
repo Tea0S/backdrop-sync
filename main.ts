@@ -24,9 +24,7 @@ import {
 import {
   createTimelineStub,
   createWikiStub,
-  countPendingPublish,
   getSyncBadgeState,
-  publishPending,
   pullAll,
   pullCurrentNote,
   syncBadgeLabel,
@@ -39,12 +37,11 @@ import {
 } from "./src/markdown";
 import {
   ArticlePropertiesModal,
-  BulkSyncConfirmModal,
   ConflictListModal,
   InsertAudioModal,
   InsertImageModal,
   ResolveSyncModal,
-  SyncConfirmModal,
+  SyncPanelModal,
   WikilinkSuggestModal,
   applyEditorFormat,
   resolveWorldSlug,
@@ -108,7 +105,10 @@ export default class BackdropPlugin extends Plugin {
       void this.runPull();
     });
     this.addRibbonIcon("upload", "Sync to BackDrop", () => {
-      void this.runPublishCurrent();
+      const active = this.app.workspace.getActiveFile();
+      this.openSyncPanel({
+        focusFile: active && this.isBackdropNoteSync(active) ? active : null,
+      });
     });
 
     this.registerEvent(
@@ -193,7 +193,7 @@ export default class BackdropPlugin extends Plugin {
         const file = view?.file;
         if (!file) return false;
         if (checking) return true;
-        void this.runPublishCurrent(file);
+        this.openSyncPanel({ focusFile: file });
         return true;
       },
     });
@@ -205,7 +205,7 @@ export default class BackdropPlugin extends Plugin {
         const file = view?.file;
         if (!file) return false;
         if (checking) return true;
-        void this.runPublishCurrent(file, { force: true });
+        this.openSyncPanel({ focusFile: file, force: true });
         return true;
       },
     });
@@ -213,30 +213,8 @@ export default class BackdropPlugin extends Plugin {
     this.addCommand({
       id: "backdrop-publish-pending",
       name: "Sync all pending",
-      callback: async () => {
-        try {
-          const pending = await countPendingPublish(this.app, this.settings);
-          if (pending === 0) {
-            new Notice("BackDrop: nothing pending to sync.");
-            return;
-          }
-          new BulkSyncConfirmModal(this.app, pending, async () => {
-            try {
-              await publishPending(
-                this.app,
-                this.client,
-                this.settings,
-                () => this.saveSettings(),
-                this.slugIndex
-              );
-              void this.refreshSyncBadge();
-            } catch (e) {
-              noticeError(e);
-            }
-          }).open();
-        } catch (e) {
-          noticeError(e);
-        }
+      callback: () => {
+        this.openSyncPanel();
       },
     });
 
@@ -690,7 +668,7 @@ export default class BackdropPlugin extends Plugin {
     );
     menu.addItem((item) =>
       item.setTitle("Sync to BackDrop…").setIcon("upload").onClick(() => {
-        if (view.file) void this.runPublishCurrent(view.file);
+        this.openSyncPanel({ focusFile: view.file });
       })
     );
     menu.showAtMouseEvent(evt);
@@ -779,26 +757,31 @@ export default class BackdropPlugin extends Plugin {
     }
   }
 
-  async runPublishCurrent(file?: TFile | null, opts: { force?: boolean } = {}) {
-    const target = file || this.app.workspace.getActiveFile();
-    if (!(target instanceof TFile) || target.extension !== "md") {
-      new Notice("BackDrop: open a markdown note to sync.");
-      return;
-    }
-    new SyncConfirmModal(
+  openSyncPanel(opts: { focusFile?: TFile | null; force?: boolean } = {}) {
+    new SyncPanelModal(
       this.app,
-      target,
       this.settings,
       () => this.saveSettings(),
       this.client,
       this.slugIndex,
       {
         force: opts.force === true,
+        focusFile: opts.focusFile ?? null,
         onDone: () => {
           void this.refreshSyncBadge();
         },
       }
     ).open();
+  }
+
+  /** @deprecated Prefer openSyncPanel. */
+  async runPublishCurrent(file?: TFile | null, opts: { force?: boolean } = {}) {
+    const target = file || this.app.workspace.getActiveFile();
+    if (!(target instanceof TFile) || target.extension !== "md") {
+      new Notice("BackDrop: open a markdown note to sync.");
+      return;
+    }
+    this.openSyncPanel({ focusFile: target, force: opts.force });
   }
 
   /**

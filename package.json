@@ -1,6 +1,6 @@
 {
   "name": "backdrop-sync",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "BackDrop wiki/timeline sync for your vault",
   "main": "main.js",
   "scripts": {

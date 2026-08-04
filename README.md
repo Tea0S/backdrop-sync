@@ -16,7 +16,18 @@ Open a note with `backdrop_type: wiki` or `timeline` in frontmatter. The markdow
 
 A compact format strip (H2 / H3 / Bold / Italic / Link / Table) sits beside the header actions on BackDrop notes only.
 
-The status bar shows sync state for the active note: **Clean** / **Dirty** / **Conflict** / **Unpublished**. Click the badge to open **Resolve sync…** (keep local, take remote, or force-publish local). Right-click the badge for insert shortcuts.
+The status bar shows sync state for the active note: **Clean** / **Dirty** / **Conflict** / **Unpublished**. Click the badge to open **Resolve sync…** (keep local, take remote, or open the Sync panel to force-push local). Right-click the badge for insert shortcuts.
+
+## Sync to BackDrop panel
+
+Ribbon **Sync to BackDrop**, **Sync current note**, **Sync all pending**, and Resolve → **Sync local…** open a selective push panel (Obsidian Sync–style checklist):
+
+1. Lists dirty, unpublished (no `backdrop_id`), and conflict notes under the vault root.
+2. Each row: title, world, type, local status dropdown, Discord toggle (wiki), and a **Dirty** / **New** / **Conflict** hint (plus whether local differs from the last sync hash).
+3. Checkboxes default on for dirty/unpublished/conflict; uncheck anything not ready.
+4. **Push selected** uploads only checked notes sequentially (same rate-limit gap as before). **Cancel** closes with no push.
+5. Empty state: **Nothing to sync**.
+6. Opening from a single note pre-checks and highlights that note (even if clean). **Force sync current note** / Resolve force uses the same panel with force overwrite.
 
 ## Wiki editor helpers
 
@@ -26,7 +37,7 @@ The status bar shows sync state for the active note: **Clean** / **Dirty** / **C
 | **Insert audio** | Same upload/path flow; inserts `[label](url)`. |
 | **Insert wikilink** | Fuzzy-search the wiki slug index by title; inserts `[[Note Title]]` or `[[Note Title\|label]]` when text was selected. |
 | **Article properties** | Status, category (with **New…** create), Publish to Discord (wiki, non-pin), characters, parent article, linked pins/regions, thumbnail (wiki) or header image (timeline). Categories/pins/regions come from the last pull cache. |
-| **Resolve sync…** | On conflict/dirty: side-by-side local vs remote. Keep local, take remote (force pull), or publish local (pushes with frontmatter status). |
+| **Resolve sync…** | On conflict/dirty: side-by-side local vs remote. Keep local, take remote (force pull), or Sync local… (opens Sync panel with force). |
 | **Review sync conflicts** | Lists notes skipped as dirty on pull; open Resolve per note. |
 
 Pull caches each world’s categories, pins, regions, lanes, and eras in plugin data. On publish, pin/region ids, characters, parent, thumbnail, and `discord_sync_enabled` are sent when present.
@@ -41,12 +52,12 @@ Pulls respect the worlds checklist (wiki / timeline facets). If you turn every w
 | **Pull updates** (command / ribbon) | Creates missing; updates clean remote-newer notes; **never overwrites dirty/local draft work** — marks **Conflict** and opens the conflict list |
 | **Pull current note** / Resolve → Take remote | Overwrites that note from the server (explicit) |
 
-Publish pushes the note to the API and **preserves frontmatter `status`** (`draft` / `unlisted` / `published`). Missing status defaults to `draft`. Publish does **not** mean “set published”.
+Publish / Sync pushes selected notes to the API and **preserves (or overrides) frontmatter `status`** (`draft` / `unlisted` / `published`). Missing status defaults to `draft`. Sync does **not** mean “set published”.
 
 ## Commands
 
 - **Pull updates** / **Pull current note**
-- **Publish current note** / **Force publish current note** / **Publish all pending**
+- **Sync current note** / **Force sync current note** / **Sync all pending** (all open the Sync panel)
 - **New wiki article** / **New timeline event**
 - **Insert image** / **Insert audio** / **Wrap selection as spoiler** / **Insert timeline embed stub** / **Insert wikilink**
 - **Article properties** / **Resolve sync…** / **Review sync conflicts**

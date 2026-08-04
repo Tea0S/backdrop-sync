@@ -522,9 +522,141 @@
 }
 
 /* -------------------------------------------------------------------------- */
-/* Sync confirm modal (pre-publish status panel)                              */
+/* Sync panel (selective multi-push)                                          */
 /* -------------------------------------------------------------------------- */
 
+.bd-sync-panel-modal {
+  width: min(42rem, 96vw);
+  max-width: 96vw;
+}
+
+.bd-sync-panel .bd-sync-panel-empty {
+  font-size: 1.15em;
+  font-weight: 600;
+  margin: 1.25em 0 0.35em;
+}
+
+.bd-sync-panel-toolbar {
+  margin-bottom: 0.5em;
+}
+
+.bd-sync-panel-list {
+  max-height: min(55vh, 28rem);
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 0.35em 0.5em;
+  margin-bottom: 0.75em;
+  background: var(--background-secondary);
+}
+
+.bd-sync-panel-row {
+  padding: 0.55em 0.4em;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.bd-sync-panel-row:last-child {
+  border-bottom: none;
+}
+
+.bd-sync-panel-row--focus {
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  border-radius: 4px;
+}
+
+.bd-sync-panel-row-head {
+  display: flex;
+  gap: 0.65em;
+  align-items: flex-start;
+}
+
+.bd-sync-panel-check {
+  margin-top: 0.35em;
+  flex: 0 0 auto;
+}
+
+.bd-sync-panel-row-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.bd-sync-panel-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.bd-sync-panel-sub {
+  font-size: 0.85em;
+  opacity: 0.75;
+  margin-top: 0.1em;
+}
+
+.bd-sync-panel-hints {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.2em;
+  flex: 0 0 auto;
+}
+
+.bd-sync-hint {
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 0.1em 0.45em;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.bd-sync-hint--dirty {
+  color: var(--text-warning);
+  background: color-mix(in srgb, var(--text-warning) 15%, transparent);
+}
+
+.bd-sync-hint--new {
+  color: var(--text-accent);
+  background: color-mix(in srgb, var(--text-accent) 15%, transparent);
+}
+
+.bd-sync-hint--conflict {
+  color: var(--text-error);
+  background: color-mix(in srgb, var(--text-error) 15%, transparent);
+}
+
+.bd-sync-hint--clean {
+  opacity: 0.7;
+}
+
+.bd-sync-hint--differs {
+  text-transform: none;
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+.bd-sync-hint--same {
+  text-transform: none;
+  font-weight: 400;
+  opacity: 0.6;
+}
+
+.bd-sync-panel-row-controls {
+  margin-left: 1.6em;
+  margin-top: 0.25em;
+}
+
+.bd-sync-panel-row-controls .setting-item {
+  border-top: none;
+  padding: 0.35em 0;
+}
+
+.bd-sync-panel-footer-status {
+  font-size: 0.9em;
+  opacity: 0.8;
+  margin-bottom: 0.5em;
+}
+
+/* Legacy single-note confirm styles (kept for any residual class use) */
 .bd-sync-confirm .bd-sync-confirm-meta {
   margin: 0.75em 0 1em;
   padding: 0.65em 0.85em;
