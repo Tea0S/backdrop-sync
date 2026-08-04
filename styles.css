@@ -82,10 +82,10 @@
   overflow: visible;
 }
 
-/* Reading view — beat theme width:100% embeds via higher specificity (no !important on width). */
-.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--left,
-.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--left {
-  float: left !important;
+/* Reading view — beat theme float resets via higher specificity (no !important). */
+body .markdown-preview-view.bd-has-lore-figures .bd-lore-figure.bd-lore-figure--left,
+body .markdown-reading-view.bd-has-lore-figures .bd-lore-figure.bd-lore-figure--left {
+  float: left;
   clear: both;
   display: block;
   width: auto;
@@ -93,9 +93,9 @@
   margin: 0.15em 1.1em 0.75em 0;
 }
 
-.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--right,
-.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--right {
-  float: right !important;
+body .markdown-preview-view.bd-has-lore-figures .bd-lore-figure.bd-lore-figure--right,
+body .markdown-reading-view.bd-has-lore-figures .bd-lore-figure.bd-lore-figure--right {
+  float: right;
   clear: both;
   display: block;
   width: auto;

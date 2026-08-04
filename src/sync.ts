@@ -888,7 +888,7 @@ export async function pullAll(
       conflictN ? 12000 : 5000
     );
     if (conflictN) {
-      const actions = notice.noticeEl.createDiv({ cls: "bd-notice-actions" });
+      const actions = notice.messageEl.createDiv({ cls: "bd-notice-actions" });
       const btn = actions.createEl("button", {
         text: "Review conflicts",
         cls: "mod-cta",
@@ -1286,7 +1286,7 @@ export async function listPublishCandidates(
     const { data } = splitFrontmatter(content);
     const typeRaw = String(data.backdrop_type || "");
     if (typeRaw !== "wiki" && typeRaw !== "timeline") continue;
-    const type = typeRaw as "wiki" | "timeline";
+    const type: "wiki" | "timeline" = typeRaw === "wiki" ? "wiki" : "timeline";
 
     const dirty = await fileIsDirty(app, file, settings);
     const id = String(data.backdrop_id || "").trim();

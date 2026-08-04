@@ -1,4 +1,9 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import {
+  App,
+  PluginSettingTab,
+  Setting,
+  type SettingDefinitionItem,
+} from "obsidian";
 import type BackdropPlugin from "../main";
 import { noticeError } from "./api";
 import type { ObsidianWorldSummary } from "./types";
@@ -16,92 +21,99 @@ export class BackdropSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
-  /**
-   * Worlds checklist stays imperative (async load + custom rows).
-   * Declarative `getSettingDefinitions()` needs Obsidian 1.13+ and would
-   * bypass `display()` when non-empty — defer until minAppVersion can rise.
-   */
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-
-    new Setting(containerEl)
-      .setName("API base URL")
-      .setDesc("Usually https://api.backdrop.quest")
-      .addText((text) =>
-        text
-          .setPlaceholder("https://api.backdrop.quest")
-          .setValue(this.plugin.settings.apiBaseUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.apiBaseUrl = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("API key")
-      .setDesc("Create a bd_… key on the BackDrop dashboard (Obsidian API keys).")
-      .addText((text) => {
-        text.inputEl.type = "password";
-        text
-          .setPlaceholder("bd_…")
-          .setValue(this.plugin.settings.apiKey)
-          .onChange(async (value) => {
-            this.plugin.settings.apiKey = value.trim();
-            await this.plugin.saveSettings();
-            this.worlds = null;
-            this.worldsError = "";
-            this.display();
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      {
+        name: "API base URL",
+        desc: "Usually https://api.backdrop.quest",
+        aliases: ["endpoint", "server"],
+        control: {
+          type: "text",
+          key: "apiBaseUrl",
+          placeholder: "https://api.backdrop.quest",
+        },
+      },
+      {
+        name: "API key",
+        desc: "Create a bd_… key on the BackDrop dashboard (Obsidian API keys).",
+        aliases: ["token", "auth", "password"],
+        // Password input is not available on the declarative text control.
+        render: (setting) => {
+          setting.addText((text) => {
+            text.inputEl.type = "password";
+            text
+              .setPlaceholder("bd_…")
+              .setValue(this.plugin.settings.apiKey)
+              .onChange(async (value) => {
+                this.plugin.settings.apiKey = value.trim();
+                await this.plugin.saveSettings();
+                this.worlds = null;
+                this.worldsError = "";
+                this.update();
+              });
           });
-      });
-
-    new Setting(containerEl)
-      .setName("Vault folder")
-      .setDesc("Root folder for synced notes")
-      .addText((text) =>
-        text
-          .setPlaceholder("BackDrop")
-          .setValue(this.plugin.settings.vaultRoot)
-          .onChange(async (value) => {
-            this.plugin.settings.vaultRoot = value.trim() || "BackDrop";
-            await this.plugin.saveSettings();
-          })
-      );
-
-    this.renderWorldsSection(containerEl);
-
-    new Setting(containerEl)
-      .setName("Pull on startup")
-      .setDesc("Automatically pull when the app loads (requires API key).")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.pullOnStartup).onChange(async (value) => {
-          this.plugin.settings.pullOnStartup = value;
-          await this.plugin.saveSettings();
-        })
-      );
+        },
+      },
+      {
+        name: "Vault folder",
+        desc: "Root folder for synced notes",
+        aliases: ["path", "directory"],
+        control: {
+          type: "text",
+          key: "vaultRoot",
+          placeholder: "BackDrop",
+        },
+      },
+      {
+        type: "group",
+        heading: "Worlds to sync",
+        items: [
+          {
+            name: "Select worlds",
+            desc: this.plugin.settings.syncWorldsConfigured
+              ? "Pull only the worlds and facets enabled below."
+              : "Nothing customized yet — pull uses all editable worlds (wiki + timeline). Toggle any option to save an explicit list.",
+            aliases: ["wiki", "timeline", "checklist", "worlds"],
+            render: (setting) => {
+              this.renderWorldsSection(setting);
+            },
+          },
+        ],
+      },
+      {
+        name: "Pull on startup",
+        desc: "Automatically pull when the app loads (requires API key).",
+        aliases: ["autoload", "auto pull"],
+        control: {
+          type: "toggle",
+          key: "pullOnStartup",
+        },
+      },
+    ];
   }
 
-  private renderWorldsSection(containerEl: HTMLElement): void {
-    new Setting(containerEl).setName("Worlds to sync").setHeading();
+  async setControlValue(key: string, value: unknown): Promise<void> {
+    let next: unknown = value;
+    if (typeof value === "string") {
+      if (key === "apiBaseUrl") next = value.trim();
+      else if (key === "vaultRoot") next = value.trim() || "BackDrop";
+    }
+    await Promise.resolve(super.setControlValue(key, next));
+  }
+
+  private renderWorldsSection(setting: Setting): void {
+    const host = setting.settingEl.createDiv({ cls: "bd-world-settings-host" });
 
     const hasKey = Boolean(this.plugin.settings.apiKey.trim());
     if (!hasKey) {
-      containerEl.createEl("p", {
+      host.createEl("p", {
         text: "Set an API key above to load editable worlds.",
         cls: "setting-item-description",
       });
       return;
     }
 
-    const header = new Setting(containerEl)
-      .setName("Select worlds")
-      .setDesc(
-        this.plugin.settings.syncWorldsConfigured
-          ? "Pull only the worlds and facets enabled below."
-          : "Nothing customized yet — pull uses all editable worlds (wiki + timeline). Toggle any option to save an explicit list."
-      );
-
-    header.addButton((btn) =>
+    setting.addButton((btn) =>
       btn
         .setButtonText(this.worldsLoading ? "Loading…" : "Refresh")
         .setDisabled(this.worldsLoading)
@@ -111,7 +123,7 @@ export class BackdropSettingTab extends PluginSettingTab {
     );
 
     if (this.worldsLoading && !this.worlds) {
-      containerEl.createEl("p", {
+      host.createEl("p", {
         text: "Loading worlds…",
         cls: "setting-item-description",
       });
@@ -119,7 +131,7 @@ export class BackdropSettingTab extends PluginSettingTab {
     }
 
     if (this.worldsError) {
-      containerEl.createEl("p", {
+      host.createEl("p", {
         text: this.worldsError,
         cls: "bd-settings-error",
       });
@@ -128,7 +140,7 @@ export class BackdropSettingTab extends PluginSettingTab {
 
     if (!this.worlds) {
       void this.loadWorlds(false);
-      containerEl.createEl("p", {
+      host.createEl("p", {
         text: "Loading worlds…",
         cls: "setting-item-description",
       });
@@ -136,14 +148,14 @@ export class BackdropSettingTab extends PluginSettingTab {
     }
 
     if (!this.worlds.length) {
-      containerEl.createEl("p", {
+      host.createEl("p", {
         text: "No editable worlds for this API key.",
         cls: "setting-item-description",
       });
       return;
     }
 
-    const list = containerEl.createDiv({ cls: "bd-world-checklist" });
+    const list = host.createDiv({ cls: "bd-world-checklist" });
     for (const world of this.worlds) {
       this.renderWorldRow(list, world);
     }
@@ -202,7 +214,7 @@ export class BackdropSettingTab extends PluginSettingTab {
     applyWorldChecklist(this.plugin.settings, this.worlds, this.checklistState);
     await this.plugin.saveSettings();
     // Refresh once when switching from implicit-all to explicit list (updates header desc).
-    if (!wasConfigured) this.display();
+    if (!wasConfigured) this.update();
   }
 
   private async loadWorlds(force: boolean): Promise<void> {
@@ -210,7 +222,7 @@ export class BackdropSettingTab extends PluginSettingTab {
     if (this.worlds && !force) return;
     this.worldsLoading = true;
     this.worldsError = "";
-    this.display();
+    this.update();
     try {
       const res = await this.plugin.client.worlds();
       this.worlds = res.worlds || [];
@@ -224,7 +236,7 @@ export class BackdropSettingTab extends PluginSettingTab {
       noticeError(e, "Load worlds");
     } finally {
       this.worldsLoading = false;
-      this.display();
+      this.update();
     }
   }
 }

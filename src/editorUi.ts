@@ -933,7 +933,7 @@ export class ResolveSyncModal extends Modal {
       .setName("Take remote")
       .setDesc("Force-pull this note from BackDrop (overwrites local edits).")
       .addButton((btn) =>
-        btn.setButtonText("Take remote").setWarning().onClick(async () => {
+        btn.setButtonText("Take remote").setDestructive().onClick(async () => {
           this.close();
           try {
             await pullCurrentNote(
