@@ -77,6 +77,10 @@ export interface WikiFrontmatter {
   parent_article_id?: string | null;
   /** Display-only parent title from last pull (not sent on publish). */
   parent?: string;
+  /** When true, published wiki articles sync to Discord (hidden for pin-sourced). */
+  discord_sync_enabled?: boolean;
+  /** Article source from BackDrop (e.g. manual | pin). */
+  backdrop_source?: string;
   backdrop_updated_at?: string;
   backdrop_synced_at?: string;
 }
@@ -129,6 +133,7 @@ export interface PullPackArticle {
   }>;
   updated_at?: string;
   source?: string;
+  discord_sync_enabled?: boolean;
 }
 
 export interface PullPack {

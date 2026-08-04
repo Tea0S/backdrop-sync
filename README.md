@@ -1,12 +1,13 @@
-# BackDrop Obsidian
+# BackDrop Sync
+
 
 Digital-garden style sync for BackDrop wiki and timeline articles.
 
 ## Setup
 
-1. On [backdrop.quest](https://backdrop.quest) dashboard → **Obsidian API keys** → Create key (copy once).
+1. On [backdrop.quest](https://backdrop.quest) dashboard → **API keys** (vault sync) → Create key (copy once).
 2. In this repo: `npm install && npm run install:vault`
-3. Enable **BackDrop** under Obsidian → Community plugins (Roleplay Writing vault).
+3. Enable **BackDrop** under Community plugins (Roleplay Writing vault).
 4. Settings → BackDrop: paste API base (`https://api.backdrop.quest`) and your `bd_…` key. After the key is set, a **Worlds to sync** checklist loads from the API — enable wiki and/or timeline per world (disabled when you lack edit access). Leave the list untouched to pull all editable worlds; any toggle saves an explicit selection.
 
 ## Editing bar
@@ -24,10 +25,10 @@ The status bar shows sync state for the active note: **Clean** / **Dirty** / **C
 | **Insert image** | Pick a vault file or paste path/HTTPS URL; vault files upload via BackDrop assets, then insert `![alt](url){align=…}` (align prompted). |
 | **Insert audio** | Same upload/path flow; inserts `[label](url)`. |
 | **Insert wikilink** | Fuzzy-search the wiki slug index by title; inserts `[[Note Title]]` or `[[Note Title\|label]]` when text was selected. |
-| **Article properties** | Status, category/tags (with **New…** create), characters, parent article, linked pins/regions, thumbnail (wiki) or header image (timeline). Categories/tags/pins/regions come from the last pull cache; create category/tag refreshes that cache. |
+| **Article properties** | Status, category (with **New…** create), Publish to Discord (wiki, non-pin), characters, parent article, linked pins/regions, thumbnail (wiki) or header image (timeline). Categories/pins/regions come from the last pull cache. |
 | **Resolve sync…** | On conflict: side-by-side local vs remote body excerpts. Keep local, take remote (force pull), or publish local (force). |
 
-Pull caches each world’s categories, tags, pins, regions, lanes, and eras in plugin data. On publish, wiki `tags`, pin/region ids, characters, parent, and thumbnail are sent when present.
+Pull caches each world’s categories, pins, regions, lanes, and eras in plugin data. On publish, pin/region ids, characters, parent, thumbnail, and `discord_sync_enabled` are sent when present.
 
 ## Pull behavior
 
@@ -110,4 +111,4 @@ npm run build
 npm run install:vault
 ```
 
-Override install path with `BACKDROP_OBSIDIAN_VAULT_PLUGIN`.
+Override install path with `BACKDROP_SYNC_VAULT_PLUGIN`.

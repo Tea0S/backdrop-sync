@@ -18,7 +18,6 @@ import {
   pullCurrentNote,
   publishFile,
   upsertCatalogCategory,
-  upsertCatalogTag,
   type SyncBadgeState,
 } from "./sync";
 import type { BackdropSettings, WorldCatalogMeta } from "./types";
@@ -346,7 +345,8 @@ export class WikilinkSuggestModal extends FuzzySuggestModal<WikiLinkEntry> {
 export class ArticlePropertiesModal extends Modal {
   private status: string;
   private category: string;
-  private selectedTags: Set<string>;
+  private discordSyncEnabled = false;
+  private articleSource = "";
   private type: string;
   private catalog: WorldCatalogMeta | undefined;
   private world = "";
@@ -371,7 +371,8 @@ export class ArticlePropertiesModal extends Modal {
     super(app);
     this.status = "draft";
     this.category = "general";
-    this.selectedTags = new Set();
+    this.discordSyncEnabled = false;
+    this.articleSource = "";
     this.type = "wiki";
   }
 
@@ -386,8 +387,9 @@ export class ArticlePropertiesModal extends Modal {
     this.type = String(data.backdrop_type || "wiki");
     this.status = String(data.status || "draft");
     this.category = String(data.category || "general");
-    const tags = Array.isArray(data.tags) ? data.tags.map((t) => String(t)) : [];
-    this.selectedTags = new Set(tags);
+    this.articleSource = String(data.backdrop_source || "").trim();
+    this.discordSyncEnabled =
+      this.articleSource === "pin" ? false : Boolean(data.discord_sync_enabled);
     this.world = String(data.backdrop_world || "").trim();
     this.catalog = this.settings.worldCatalogs?.[this.world];
     this.charactersText = Array.isArray(data.characters)
@@ -416,7 +418,7 @@ export class ArticlePropertiesModal extends Modal {
     contentEl.createEl("h2", { text: "Article properties" });
     if (!this.catalog?.categories?.length && this.type === "wiki") {
       contentEl.createEl("p", {
-        text: "No cached categories/tags yet — Pull from BackDrop once to load them.",
+        text: "No cached categories yet — Pull from BackDrop once to load them.",
         cls: "setting-item-description",
       });
     }
@@ -483,38 +485,18 @@ export class ArticlePropertiesModal extends Modal {
         })
       );
 
-    const tagList = contentEl.createDiv({ cls: "bd-tag-checklist" });
-    tagList.createEl("div", { text: "Tags", cls: "setting-item-name" });
-    const catalogTags = this.catalog?.tags || [];
-    if (!catalogTags.length) {
-      tagList.createEl("p", {
-        text: this.selectedTags.size
-          ? `Current: ${Array.from(this.selectedTags).join(", ")} (pull to edit from catalog)`
-          : "No tags in catalog — pull first, or create one.",
-        cls: "setting-item-description",
-      });
-    } else {
-      for (const tag of catalogTags) {
-        new Setting(tagList).setName(tag.name).addToggle((toggle) => {
-          toggle.setValue(this.selectedTags.has(tag.name) || this.selectedTags.has(tag.slug));
-          toggle.onChange((on) => {
-            if (on) {
-              this.selectedTags.add(tag.name);
-              this.selectedTags.delete(tag.slug);
-            } else {
-              this.selectedTags.delete(tag.name);
-              this.selectedTags.delete(tag.slug);
-            }
+
+
+    if (this.articleSource !== "pin") {
+      new Setting(contentEl)
+        .setName("Publish to Discord")
+        .setDesc("When published, sync this article to your Discord forum.")
+        .addToggle((toggle) => {
+          toggle.setValue(this.discordSyncEnabled).onChange((on) => {
+            this.discordSyncEnabled = on;
           });
         });
-      }
     }
-    new Setting(tagList).addButton((btn) =>
-      btn.setButtonText("New tag…").onClick(() => {
-        this.promptCreateTag();
-      })
-    );
-
     new Setting(contentEl)
       .setName("Characters")
       .setDesc("Comma-separated character names")
@@ -683,29 +665,6 @@ export class ArticlePropertiesModal extends Modal {
     }).open();
   }
 
-  private promptCreateTag() {
-    if (!this.world) {
-      new Notice("BackDrop: backdrop_world is required.");
-      return;
-    }
-    new PromptNameModal(this.app, "New tag", "Tag name", async (name) => {
-      try {
-        const { tag } = await this.client.createWikiTag(this.world, { name });
-        upsertCatalogTag(this.settings, this.world, {
-          id: String(tag.id),
-          slug: String(tag.slug),
-          name: String(tag.name),
-        });
-        await this.saveSettings();
-        this.catalog = this.settings.worldCatalogs?.[this.world];
-        this.selectedTags.add(String(tag.name));
-        new Notice(`BackDrop: created tag ${tag.name}`);
-        this.render();
-      } catch (e) {
-        noticeError(e, "Create tag");
-      }
-    }).open();
-  }
 
   private pickParentArticle() {
     if (!this.slugIndex) {
@@ -743,7 +702,10 @@ export class ArticlePropertiesModal extends Modal {
     fm.status = this.status;
     if (this.type === "wiki") {
       fm.category = this.category;
-      fm.tags = Array.from(this.selectedTags);
+      if (this.articleSource !== "pin") {
+        fm.discord_sync_enabled = this.discordSyncEnabled;
+      }
+      if (this.articleSource) fm.backdrop_source = this.articleSource;
       fm.characters = this.charactersText
         .split(",")
         .map((s) => s.trim())

@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const vaultPlugin = path.resolve(
-  process.env.BACKDROP_OBSIDIAN_VAULT_PLUGIN ||
-    "C:/Users/Bambi/Documents/Roleplay Writing/.obsidian/plugins/backdrop-obsidian"
+  process.env.BACKDROP_SYNC_VAULT_PLUGIN ||
+    "C:/Users/Bambi/Documents/Roleplay Writing/.obsidian/plugins/backdrop-sync"
 );
 
 fs.mkdirSync(vaultPlugin, { recursive: true });

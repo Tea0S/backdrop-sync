@@ -825,7 +825,7 @@ export async function pullAll(
     );
   }
   if (conflicts.length) {
-    console.warn("[backdrop-obsidian] dirty conflicts", conflicts);
+    console.warn("[backdrop-sync] dirty conflicts", conflicts);
   }
 }
 
@@ -1000,6 +1000,15 @@ export async function publishFile(
         "BackDrop: tags not sent (pull once to cache tag IDs). Other fields still publish."
       );
     }
+
+    const source = String(data.backdrop_source || "").trim();
+    if (source !== "pin") {
+      if (typeof data.discord_sync_enabled === "boolean") {
+        payload.discord_sync_enabled = data.discord_sync_enabled;
+      } else if (data.discord_sync_enabled === "true" || data.discord_sync_enabled === "false") {
+        payload.discord_sync_enabled = data.discord_sync_enabled === "true";
+      }
+    }
     const id = String(data.backdrop_id || "").trim();
     let article: Record<string, unknown>;
     try {
@@ -1061,6 +1070,16 @@ export async function publishFile(
       category: article.category_slug || data.category,
       status: article.status,
       tags: publishedTags,
+      backdrop_source: article.source || String(data.backdrop_source || "manual"),
+      discord_sync_enabled:
+        article.source === "pin"
+          ? false
+          : Boolean(
+              article.discord_sync_enabled ??
+                (typeof data.discord_sync_enabled === "boolean"
+                  ? data.discord_sync_enabled
+                  : false)
+            ),
       summary: article.summary || "",
       thumbnail_url: article.thumbnail_url || "",
       characters: charNames,

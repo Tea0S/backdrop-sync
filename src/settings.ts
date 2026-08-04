@@ -68,7 +68,7 @@ export class BackdropSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Pull on startup")
-      .setDesc("Automatically pull when Obsidian loads (requires API key).")
+      .setDesc("Automatically pull when the app loads (requires API key).")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.pullOnStartup).onChange(async (value) => {
           this.plugin.settings.pullOnStartup = value;

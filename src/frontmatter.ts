@@ -173,6 +173,9 @@ export function wikiFrontmatterFromArticle(
       ? article.map_region_ids.map(String)
       : [],
     parent_article_id: article.parent_article_id || null,
+    backdrop_source: article.source || "manual",
+    discord_sync_enabled:
+      article.source === "pin" ? false : Boolean(article.discord_sync_enabled),
     backdrop_updated_at: article.updated_at || syncedAt,
     backdrop_synced_at: syncedAt,
   };

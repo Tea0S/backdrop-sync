@@ -1,14 +1,19 @@
 {
-  "name": "backdrop-obsidian",
-  "version": "0.1.6",
-  "description": "BackDrop wiki/timeline sync for Obsidian",
+  "name": "backdrop-sync",
+  "version": "0.1.7",
+  "description": "BackDrop wiki/timeline sync for your vault",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "install:vault": "npm run build && node scripts/install-vault.mjs"
   },
-  "keywords": ["obsidian", "backdrop", "wiki", "timeline"],
+  "keywords": [
+    "backdrop",
+    "wiki",
+    "timeline",
+    "sync"
+  ],
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.0",
