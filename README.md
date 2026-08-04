@@ -112,3 +112,21 @@ npm run install:vault
 ```
 
 Override install path with `BACKDROP_SYNC_VAULT_PLUGIN`.
+
+## Publishing
+
+Obsidian BRAT / community installs need a GitHub Release whose **tag equals `manifest.json` `version` with no `v` prefix** (e.g. `0.1.8`, not `v0.1.8`), with assets `main.js`, `manifest.json`, `styles.css`, and `versions.json`.
+
+1. Bump version (keeps `manifest.json`, `package.json`, and `versions.json` in sync):
+
+   ```bash
+   npm run version:patch   # or version:minor / version:major
+   # or one-shot:
+   npm run release:patch   # bump + build, then commit/push yourself
+   ```
+
+2. Commit the bumped files and push to `master` (or `main`).
+
+3. GitHub Actions (`.github/workflows/release.yml`) runs `npm ci && npm run build`, then creates/updates a release tagged with the manifest version and uploads the plugin assets.
+
+Do **not** create tags like `v0.1.x` by hand. Re-running CI for the same version updates that release in place.
