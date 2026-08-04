@@ -78,8 +78,8 @@ export default class BackdropPlugin extends Plugin {
 
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.addClass("bd-statusbar");
+    this.statusBarEl.addClass("bd-statusbar--hidden");
     this.statusBarEl.setText("BackDrop");
-    this.statusBarEl.style.display = "none";
     this.statusBarEl.addEventListener("click", () => {
       this.openResolveSync();
     });
@@ -434,7 +434,7 @@ export default class BackdropPlugin extends Plugin {
 
       if (!isBd || !view) {
         if (this.statusBarEl) {
-          this.statusBarEl.style.display = "none";
+          this.statusBarEl.addClass("bd-statusbar--hidden");
           this.statusBarEl.setText("");
           this.statusBarEl.removeClass("bd-statusbar--clean");
           this.statusBarEl.removeClass("bd-statusbar--dirty");
@@ -486,7 +486,7 @@ export default class BackdropPlugin extends Plugin {
       /* leaf change must never throw into Obsidian's workspace update */
       this.clearHeaderActions();
       this.removeFormatBar();
-      if (this.statusBarEl) this.statusBarEl.style.display = "none";
+      if (this.statusBarEl) this.statusBarEl.addClass("bd-statusbar--hidden");
     }
   }
 
@@ -496,10 +496,9 @@ export default class BackdropPlugin extends Plugin {
       view.containerEl.querySelector(".view-header") ||
       view.containerEl.querySelector(".view-actions")?.parentElement ||
       view.containerEl;
-    if (!(container instanceof HTMLElement)) return;
+    if (!container || !container.instanceOf(HTMLElement)) return;
 
-    const bar = document.createElement("div");
-    bar.className = "bd-format-bar";
+    const bar = container.createDiv({ cls: "bd-format-bar" });
     bar.setAttribute("role", "toolbar");
     bar.setAttribute("aria-label", "BackDrop formatting");
 
@@ -544,10 +543,10 @@ export default class BackdropPlugin extends Plugin {
     if (!this.statusBarEl) return;
     const file = this.app.workspace.getActiveFile();
     if (!file || !this.isBackdropNoteSync(file)) {
-      this.statusBarEl.style.display = "none";
+      this.statusBarEl.addClass("bd-statusbar--hidden");
       return;
     }
-    this.statusBarEl.style.display = "";
+    this.statusBarEl.removeClass("bd-statusbar--hidden");
     this.statusBarEl.removeClass("bd-statusbar--clean");
     this.statusBarEl.removeClass("bd-statusbar--dirty");
     this.statusBarEl.removeClass("bd-statusbar--conflict");

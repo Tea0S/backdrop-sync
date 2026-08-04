@@ -16,10 +16,16 @@ export class BackdropSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  /**
+   * TODO(obsidian 1.13+): adopt `getSettingDefinitions()` for the static
+   * fields (API URL / key / vault / pull-on-startup). The worlds checklist is
+   * async + custom-rendered, so keep imperative `display()` until that can be
+   * expressed as a definition list / render callback without a large rewrite.
+   */
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "BackDrop" });
+    new Setting(containerEl).setName("BackDrop").setHeading();
 
     new Setting(containerEl)
       .setName("API base URL")
@@ -78,7 +84,7 @@ export class BackdropSettingTab extends PluginSettingTab {
   }
 
   private renderWorldsSection(containerEl: HTMLElement): void {
-    containerEl.createEl("h3", { text: "Worlds to sync" });
+    new Setting(containerEl).setName("Worlds to sync").setHeading();
 
     const hasKey = Boolean(this.plugin.settings.apiKey.trim());
     if (!hasKey) {

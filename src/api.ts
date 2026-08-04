@@ -104,6 +104,10 @@ export class BackdropApiError extends Error {
 
 
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
 export class BackdropClient {
 
   constructor(
@@ -175,7 +179,9 @@ export class BackdropClient {
 
     try {
 
-      parsed = res.json as Record<string, unknown>;
+      const raw: unknown = res.json;
+
+      if (isPlainObject(raw)) parsed = raw;
 
     } catch {
 

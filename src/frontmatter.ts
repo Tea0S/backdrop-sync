@@ -66,7 +66,7 @@ function yamlValue(value: unknown): string {
   if (value === null) return "null";
   if (typeof value === "boolean" || typeof value === "number") return String(value);
   if (typeof value === "string") {
-    if (/[:#\[\]{},&*!|>'"%@`]/.test(value) || value.includes("\n") || value.trim() !== value) {
+    if (/[:#[\]{},&*!|>'"%@`]/.test(value) || value.includes("\n") || value.trim() !== value) {
       return JSON.stringify(value);
     }
     return value;
@@ -110,7 +110,8 @@ export function parseSimpleYaml(src: string): Record<string, unknown> {
     }
     if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
       try {
-        out[key] = JSON.parse(raw.replace(/^'/, '"').replace(/'$/, '"'));
+        const parsed: unknown = JSON.parse(raw.replace(/^'/, '"').replace(/'$/, '"'));
+        out[key] = parsed;
       } catch {
         out[key] = raw.slice(1, -1);
       }
@@ -118,7 +119,8 @@ export function parseSimpleYaml(src: string): Record<string, unknown> {
     }
     if (raw.startsWith("[") || raw.startsWith("{")) {
       try {
-        out[key] = JSON.parse(raw);
+        const parsed: unknown = JSON.parse(raw);
+        out[key] = parsed;
       } catch {
         out[key] = raw;
       }

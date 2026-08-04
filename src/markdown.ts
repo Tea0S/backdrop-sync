@@ -179,14 +179,6 @@ function encodeSpacesInUrl(url: string): string {
   return u.toString();
 }
 
-function escapeHtmlAttr(value: string): string {
-  return String(value || "")
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
 function isAlign(value: string | null | undefined): value is Align {
   return value === "left" || value === "center" || value === "right";
 }
@@ -195,7 +187,7 @@ function getWrapTarget(img: HTMLImageElement): HTMLElement {
   const embed = img.closest(
     "span.internal-embed, span.image-embed, span.media-embed, div.internal-embed"
   );
-  if (embed instanceof HTMLElement && embed.contains(img)) return embed;
+  if (embed && embed.instanceOf(HTMLElement) && embed.contains(img)) return embed;
   return img;
 }
 
@@ -273,7 +265,7 @@ function repairImageSrc(img: HTMLImageElement, preferredUrl?: string): void {
 function wrapImageInFigure(img: HTMLImageElement, align: Align, preferredUrl?: string): HTMLElement {
   repairImageSrc(img, preferredUrl);
   const existing = img.closest(".bd-lore-figure");
-  if (existing instanceof HTMLElement) {
+  if (existing && existing.instanceOf(HTMLElement)) {
     setFigureAlign(existing, align);
     normalizeAlignedImageSizing(img, align);
     hoistFigureFromParagraph(existing);
@@ -283,7 +275,7 @@ function wrapImageInFigure(img: HTMLImageElement, align: Align, preferredUrl?: s
   // Capture src before moving nodes — some themes/widgets clear attributes on reparent.
   const srcBefore = img.getAttribute("src") || img.src || "";
   const target = getWrapTarget(img);
-  const figure = document.createElement("figure");
+  const figure = createEl("figure");
   setFigureAlign(figure, align);
   target.replaceWith(figure);
   figure.appendChild(target);
@@ -299,9 +291,7 @@ function wrapImageInFigure(img: HTMLImageElement, align: Align, preferredUrl?: s
   repairImageSrc(img, preferredUrl || srcBefore);
 
   if (img.alt && !figure.querySelector("figcaption")) {
-    const cap = document.createElement("figcaption");
-    cap.textContent = img.alt;
-    figure.appendChild(cap);
+    figure.createEl("figcaption", { text: img.alt });
   }
   normalizeAlignedImageSizing(img, align);
   hoistFigureFromParagraph(figure);
@@ -323,7 +313,7 @@ function stripAlignTokensFromTree(root: Node): Align | null {
   const toFix: Text[] = [];
   let node = walker.nextNode();
   while (node) {
-    toFix.push(node as Text);
+    if (node.instanceOf(Text)) toFix.push(node);
     node = walker.nextNode();
   }
   for (const textNode of toFix) {
@@ -344,9 +334,9 @@ function stripAlignTokensFromTree(root: Node): Align | null {
 function findPreviousImage(from: Element): HTMLImageElement | null {
   let el: Element | null = from.previousElementSibling;
   while (el) {
-    if (el instanceof HTMLImageElement) return el;
+    if (el.instanceOf(HTMLImageElement)) return el;
     const img = el.querySelector("img");
-    if (img instanceof HTMLImageElement) return img;
+    if (img && img.instanceOf(HTMLImageElement)) return img;
     el = el.previousElementSibling;
   }
   // Cross section: parent section's previous sibling
@@ -355,7 +345,10 @@ function findPreviousImage(from: Element): HTMLImageElement | null {
     let prevSec: Element | null = section.previousElementSibling;
     while (prevSec) {
       const imgs = prevSec.querySelectorAll("img");
-      if (imgs.length) return imgs[imgs.length - 1] as HTMLImageElement;
+      if (imgs.length) {
+        const last = imgs[imgs.length - 1];
+        if (last.instanceOf(HTMLImageElement)) return last;
+      }
       prevSec = prevSec.previousElementSibling;
     }
   }
@@ -403,9 +396,12 @@ function extractAlignNearImage(img: HTMLImageElement): Align | null {
   }
 
   const target = getWrapTarget(img);
+  const closest = target.closest("p, li, td, th, div.markdown-preview-section");
   const block =
-    (target.closest("p, li, td, th, div.markdown-preview-section") as HTMLElement | null) ||
-    (target.parentElement as HTMLElement | null);
+    (closest && closest.instanceOf(HTMLElement) ? closest : null) ||
+    (target.parentElement && target.parentElement.instanceOf(HTMLElement)
+      ? target.parentElement
+      : null);
   if (!block) return null;
 
   let found = stripAlignTokensFromTree(block);
@@ -457,7 +453,7 @@ function enhanceAlignedImages(root: HTMLElement) {
   const inLp = isInLivePreviewDom(root);
   const images = Array.from(root.querySelectorAll("img"));
   for (const img of images) {
-    if (!(img instanceof HTMLImageElement)) continue;
+    if (!img.instanceOf(HTMLImageElement)) continue;
     if (img.closest(".bd-lore-figure")) continue;
 
     const align = extractAlignNearImage(img);
@@ -473,24 +469,51 @@ function enhanceAlignedImages(root: HTMLElement) {
 
   // Rare: raw markdown still present in a paragraph (source not yet rendered as <img>)
   root.querySelectorAll("p").forEach((p) => {
-    const html = p.innerHTML;
-    if (!html.includes("{align=") || !html.includes("![")) return;
+    if (!p.instanceOf(HTMLElement)) return;
+    if (p.querySelector("img, .internal-embed, .bd-lore-figure")) return;
+    const text = p.textContent || "";
+    if (!text.includes("{align=") || !text.includes("![")) return;
     ALIGN_RE.lastIndex = 0;
-    if (!ALIGN_RE.test(html)) return;
+    if (!ALIGN_RE.test(text)) return;
     ALIGN_RE.lastIndex = 0;
-    p.innerHTML = html.replace(ALIGN_RE, (_all, alt, url, align) => {
-      const a = isAlign(align) ? align : "center";
-      const safeUrl = escapeHtmlAttr(sanitizeImageDestination(String(url || "").trim()));
-      const safeAlt = escapeHtmlAttr(String(alt || ""));
-      const cap = alt ? `<figcaption>${safeAlt}</figcaption>` : "";
-      return `<figure class="bd-lore-figure bd-lore-figure--${a}" data-bd-align="${a}"><img src="${safeUrl}" alt="${safeAlt}"/>${cap}</figure>`;
-    });
+
+    const frag = createFragment();
+    let last = 0;
+    let match: RegExpExecArray | null;
+    while ((match = ALIGN_RE.exec(text)) !== null) {
+      if (match.index > last) {
+        frag.appendText(text.slice(last, match.index));
+      }
+      const alt = String(match[1] || "");
+      const url = sanitizeImageDestination(String(match[2] || "").trim());
+      const a = isAlign(match[3]) ? match[3] : "center";
+      const figure = frag.createEl("figure", {
+        cls: `bd-lore-figure bd-lore-figure--${a}`,
+        attr: { "data-bd-align": a },
+      });
+      figure.createEl("img", {
+        attr: { src: url, alt },
+      });
+      if (alt) figure.createEl("figcaption", { text: alt });
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) frag.appendText(text.slice(last));
+    p.replaceWith(frag);
   });
 
   // Heal broken remote srcs even when no `{align=}` token remains.
   root.querySelectorAll("img").forEach((img) => {
-    if (img instanceof HTMLImageElement) repairImageSrc(img);
+    if (img.instanceOf(HTMLImageElement)) repairImageSrc(img);
   });
+
+  markPreviewHasLoreFigures(root);
+}
+
+/** Toggle a class on the reading/preview view so CSS can avoid broad `:has()`. */
+function markPreviewHasLoreFigures(root: HTMLElement): void {
+  const view = root.closest(".markdown-preview-view, .markdown-reading-view");
+  if (!view || !view.instanceOf(HTMLElement)) return;
+  view.toggleClass("bd-has-lore-figures", !!view.querySelector(".bd-lore-figure"));
 }
 
 /* ── Live Preview (CodeMirror 6) ─────────────────────────────────────── */
@@ -665,8 +688,7 @@ class HiddenAlignWidget extends WidgetType {
     return true;
   }
   toDOM(): HTMLElement {
-    const span = document.createElement("span");
-    span.className = "bd-lore-align-hidden";
+    const span = createSpan({ cls: "bd-lore-align-hidden" });
     span.setAttribute("aria-hidden", "true");
     span.setAttribute("data-bd-lp", LP_ALIGN_MARKER);
     return span;
@@ -762,8 +784,9 @@ function buildLpAlignDecorations(view: EditorView): DecorationSet {
 function cmLineForPos(view: EditorView, pos: number): HTMLElement | null {
   try {
     const dom = view.domAtPos(pos);
-    const node = dom.node instanceof Element ? dom.node : dom.node.parentElement;
-    return node?.closest(".cm-line") ?? null;
+    const node = dom.node.instanceOf(Element) ? dom.node : dom.node.parentElement;
+    const line = node?.closest(".cm-line");
+    return line && line.instanceOf(HTMLElement) ? line : null;
   } catch {
     return null;
   }
@@ -788,7 +811,7 @@ function applyLpAlignFigures(view: EditorView): void {
       const img =
         lineEl.querySelector("img") ||
         lineEl.querySelector(".internal-embed img, .image-embed img, .media-embed img");
-      if (img instanceof HTMLImageElement) {
+      if (img && img.instanceOf(HTMLImageElement)) {
         // Prefer markdown destination (already scanned) so LP widgets keep a loadable src.
         const preferred = hit.url && /^https?:\/\//i.test(hit.url) ? hit.url : undefined;
         wrapImageInFigure(img, hit.align, preferred ? sanitizeImageDestination(preferred) : undefined);
@@ -808,7 +831,7 @@ function hideResidualAlignText(root: HTMLElement): void {
   const nodes: Text[] = [];
   let node = walker.nextNode();
   while (node) {
-    nodes.push(node as Text);
+    if (node.instanceOf(Text)) nodes.push(node);
     node = walker.nextNode();
   }
   for (const textNode of nodes) {
@@ -825,8 +848,7 @@ function hideResidualAlignText(root: HTMLElement): void {
     const line = parent.closest(".cm-line");
     if (line?.querySelector("img, .internal-embed, .image-embed, .media-embed")) {
       if (parent.classList.contains("cm-line") || parent === line) {
-        const span = document.createElement("span");
-        span.className = "bd-lore-align-hidden";
+        const span = createSpan({ cls: "bd-lore-align-hidden" });
         span.setAttribute("aria-hidden", "true");
         textNode.parentNode?.insertBefore(span, textNode);
         span.appendChild(textNode);
@@ -861,16 +883,16 @@ const alignedImageLpPlugin = ViewPlugin.fromClass(
     }
 
     destroy() {
-      if (this.raf) cancelAnimationFrame(this.raf);
+      if (this.raf) window.cancelAnimationFrame(this.raf);
     }
 
     private scheduleDom(view: EditorView) {
-      if (this.raf) cancelAnimationFrame(this.raf);
-      this.raf = requestAnimationFrame(() => {
+      if (this.raf) window.cancelAnimationFrame(this.raf);
+      this.raf = window.requestAnimationFrame(() => {
         this.raf = 0;
         applyLpAlignFigures(view);
         // Second pass after Obsidian's image widgets finish mounting.
-        requestAnimationFrame(() => applyLpAlignFigures(view));
+        window.requestAnimationFrame(() => applyLpAlignFigures(view));
       });
     }
   },
@@ -883,17 +905,13 @@ function enhanceAudioLinks(root: HTMLElement) {
   root.querySelectorAll("a").forEach((a) => {
     const href = a.getAttribute("href") || "";
     if (!AUDIO_EXT.test(href)) return;
-    const figure = document.createElement("figure");
-    figure.className = "bd-lore-audio";
-    const audio = document.createElement("audio");
+    const figure = createEl("figure", { cls: "bd-lore-audio" });
+    const audio = figure.createEl("audio");
     audio.controls = true;
     audio.src = href;
-    figure.appendChild(audio);
     const label = (a.textContent || "").trim();
     if (label && !/^https?:\/\//i.test(label)) {
-      const cap = document.createElement("figcaption");
-      cap.textContent = label;
-      figure.appendChild(cap);
+      figure.createEl("figcaption", { text: label });
     }
     a.replaceWith(figure);
   });
@@ -964,7 +982,7 @@ function twitchParentHost(): string {
 
 function enhanceVideoLinks(root: HTMLElement) {
   root.querySelectorAll("a").forEach((a) => {
-    if (!(a instanceof HTMLAnchorElement)) return;
+    if (!a.instanceOf(HTMLAnchorElement)) return;
     if (a.closest(".bd-lore-video, .bd-lore-audio, code, pre")) return;
     const href = a.getAttribute("href") || a.href || "";
     const embed = parseVideoEmbedUrl(href);
@@ -976,27 +994,22 @@ function enhanceVideoLinks(root: HTMLElement) {
       src = `${src}${sep}parent=${encodeURIComponent(twitchParentHost())}`;
     }
 
-    const figure = document.createElement("figure");
-    figure.className = "bd-lore-figure bd-lore-video";
-    const frame = document.createElement("div");
-    frame.className = "bd-lore-video-frame";
-    const iframe = document.createElement("iframe");
-    iframe.src = src;
-    iframe.title = (a.textContent || "").trim() || "Embedded video";
-    iframe.loading = "lazy";
-    iframe.setAttribute(
-      "allow",
-      "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-    );
-    iframe.setAttribute("allowfullscreen", "true");
-    iframe.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
-    frame.appendChild(iframe);
-    figure.appendChild(frame);
+    const figure = createEl("figure", { cls: "bd-lore-figure bd-lore-video" });
+    const frame = figure.createDiv({ cls: "bd-lore-video-frame" });
+    const iframe = frame.createEl("iframe", {
+      attr: {
+        src,
+        title: (a.textContent || "").trim() || "Embedded video",
+        allow:
+          "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share",
+        allowfullscreen: "true",
+        referrerpolicy: "strict-origin-when-cross-origin",
+        loading: "lazy",
+      },
+    });
     const label = (a.textContent || "").trim();
     if (label && !/^https?:\/\//i.test(label)) {
-      const cap = document.createElement("figcaption");
-      cap.textContent = label;
-      figure.appendChild(cap);
+      figure.createEl("figcaption", { text: label });
     }
     a.replaceWith(figure);
   });
@@ -1005,7 +1018,7 @@ function enhanceVideoLinks(root: HTMLElement) {
 /** Mark tables for lore styling (Obsidian already renders GFM tables). */
 function enhanceTables(root: HTMLElement) {
   root.querySelectorAll("table").forEach((table) => {
-    if (!(table instanceof HTMLTableElement)) return;
+    if (!table.instanceOf(HTMLTableElement)) return;
     table.classList.add("bd-lore-table");
     const wrap = table.parentElement;
     if (wrap && !wrap.classList.contains("bd-lore-table-wrap") && wrap.tagName !== "FIGURE") {
@@ -1016,17 +1029,48 @@ function enhanceTables(root: HTMLElement) {
 
 function enhanceSpoilers(root: HTMLElement) {
   root.querySelectorAll("p, li, td, th, h1, h2, h3, h4").forEach((node) => {
-    const html = node.innerHTML;
-    if (!html.includes("||")) return;
-    node.innerHTML = html.replace(SPOILER_RE, (_m, text) => {
-      return `<span class="bd-discord-spoiler" title="Click to reveal">${text}</span>`;
-    });
+    if (!node.instanceOf(HTMLElement)) return;
+    replaceSpoilersInElement(node);
   });
   root.querySelectorAll(".bd-discord-spoiler").forEach((el) => {
     el.addEventListener("click", () => {
       el.classList.toggle("is-revealed");
     });
   });
+}
+
+/** Split text nodes containing `||spoiler||` into spans — no innerHTML. */
+function replaceSpoilersInElement(root: HTMLElement): void {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  let node = walker.nextNode();
+  while (node) {
+    if (node.instanceOf(Text)) textNodes.push(node);
+    node = walker.nextNode();
+  }
+  for (const textNode of textNodes) {
+    const value = textNode.nodeValue || "";
+    if (!value.includes("||")) continue;
+    if (textNode.parentElement?.closest("code, pre, .bd-discord-spoiler")) continue;
+    SPOILER_RE.lastIndex = 0;
+    if (!SPOILER_RE.test(value)) continue;
+    SPOILER_RE.lastIndex = 0;
+
+    const frag = createFragment();
+    let last = 0;
+    let match: RegExpExecArray | null;
+    while ((match = SPOILER_RE.exec(value)) !== null) {
+      if (match.index > last) frag.appendText(value.slice(last, match.index));
+      frag.createSpan({
+        cls: "bd-discord-spoiler",
+        text: match[1],
+        attr: { title: "Click to reveal" },
+      });
+      last = match.index + match[0].length;
+    }
+    if (last < value.length) frag.appendText(value.slice(last));
+    textNode.replaceWith(frag);
+  }
 }
 
 function enhanceTimelineEmbeds(root: HTMLElement) {
@@ -1038,18 +1082,16 @@ function enhanceTimelineEmbeds(root: HTMLElement) {
     });
     if (replaced === text) return;
     const parts = replaced.split(/(__BD_TIMELINE__.*?__)/);
-    const wrap = document.createElement("div");
+    const wrap = createDiv();
     for (const part of parts) {
       const m = part.match(/^__BD_TIMELINE__(.*)__$/);
       if (m) {
-        const box = document.createElement("aside");
-        box.className = "bd-timeline-embed-stub callout";
-        box.innerHTML = `<strong>Timeline embed</strong><p>View this timeline on BackDrop.</p><pre>${decodeURIComponent(m[1])}</pre>`;
-        wrap.appendChild(box);
+        const box = wrap.createEl("aside", { cls: "bd-timeline-embed-stub callout" });
+        box.createEl("strong", { text: "Timeline embed" });
+        box.createEl("p", { text: "View this timeline on BackDrop." });
+        box.createEl("pre", { text: decodeURIComponent(m[1]) });
       } else if (part.trim()) {
-        const p = document.createElement("p");
-        p.textContent = part;
-        wrap.appendChild(p);
+        wrap.createEl("p", { text: part });
       }
     }
     node.replaceWith(wrap);

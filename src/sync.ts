@@ -550,12 +550,13 @@ export async function pullWorld(
 
     const { file: existing, path } =
       mode === "force-current" && forcePath
-        ? {
-            file: app.vault.getAbstractFileByPath(forcePath) instanceof TFile
-              ? (app.vault.getAbstractFileByPath(forcePath) as TFile)
-              : null,
-            path: forcePath,
-          }
+        ? (() => {
+            const abs = app.vault.getAbstractFileByPath(forcePath);
+            return {
+              file: abs instanceof TFile ? abs : null,
+              path: forcePath,
+            };
+          })()
         : await resolveNoteFile(app, settings, saveSettings, expectedPath, wikiIndex, {
             id: article.id,
             slug: article.slug,
@@ -650,12 +651,13 @@ export async function pullWorld(
 
     const { file: existing, path } =
       mode === "force-current" && forcePath
-        ? {
-            file: app.vault.getAbstractFileByPath(forcePath) instanceof TFile
-              ? (app.vault.getAbstractFileByPath(forcePath) as TFile)
-              : null,
-            path: forcePath,
-          }
+        ? (() => {
+            const abs = app.vault.getAbstractFileByPath(forcePath);
+            return {
+              file: abs instanceof TFile ? abs : null,
+              path: forcePath,
+            };
+          })()
         : await resolveNoteFile(app, settings, saveSettings, expectedPath, timelineIndex, {
             id: event.id,
           });

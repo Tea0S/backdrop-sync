@@ -77,8 +77,8 @@
 /* Only touch overflow when a BackDrop figure is present — never globally.    */
 /* -------------------------------------------------------------------------- */
 
-.markdown-preview-view:has(.bd-lore-figure) .markdown-preview-section,
-.markdown-reading-view:has(.bd-lore-figure) .markdown-preview-section {
+.markdown-preview-view.bd-has-lore-figures .markdown-preview-section,
+.markdown-reading-view.bd-has-lore-figures .markdown-preview-section {
   overflow: visible;
 }
 
@@ -86,20 +86,20 @@
 .markdown-reading-view .bd-lore-figure--left {
   float: left !important;
   clear: both;
-  display: block !important;
+  display: block;
   width: auto !important;
   max-width: min(50%, 22rem) !important;
-  margin: 0.15em 1.1em 0.75em 0 !important;
+  margin: 0.15em 1.1em 0.75em 0;
 }
 
 .markdown-preview-view .bd-lore-figure--right,
 .markdown-reading-view .bd-lore-figure--right {
   float: right !important;
   clear: both;
-  display: block !important;
+  display: block;
   width: auto !important;
   max-width: min(50%, 22rem) !important;
-  margin: 0.15em 0 0.75em 1.1em !important;
+  margin: 0.15em 0 0.75em 1.1em;
 }
 
 .markdown-preview-view .bd-lore-figure--left img,
@@ -118,21 +118,21 @@
 .markdown-reading-view .bd-lore-figure--right .image-embed,
 .markdown-reading-view .bd-lore-figure--left .media-embed,
 .markdown-reading-view .bd-lore-figure--right .media-embed {
-  display: block !important;
+  display: block;
   width: 100% !important;
   max-width: 100% !important;
-  height: auto !important;
+  height: auto;
 }
 
 .markdown-preview-view .bd-lore-figure--center,
 .markdown-reading-view .bd-lore-figure--center {
-  display: block !important;
-  width: 100% !important;
-  max-width: 100% !important;
+  display: block;
+  width: 100%;
+  max-width: 100%;
   text-align: center;
-  float: none !important;
-  clear: both !important;
-  margin: 1em 0 !important;
+  float: none;
+  clear: both;
+  margin: 1em 0;
 }
 
 /* Clearfix after a float so following block headings don't sit beside it oddly
@@ -193,12 +193,12 @@
 /* Figure inside floated LP line: don't double-float; fill the capped line. */
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .bd-lore-figure--left,
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .bd-lore-figure--right {
-  float: none !important;
-  clear: none !important;
+  float: none;
+  clear: none;
   display: block;
-  margin: 0 !important;
-  max-width: 100% !important;
-  width: 100% !important;
+  margin: 0;
+  max-width: 100%;
+  width: 100%;
 }
 
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .bd-lore-figure--left img,
@@ -207,10 +207,10 @@
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .internal-embed img,
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .image-embed img,
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .image-embed img {
-  display: block !important;
-  width: 100% !important;
-  max-width: 100% !important;
-  height: auto !important;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
 }
 
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .internal-embed,
@@ -219,9 +219,9 @@
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .image-embed,
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .media-embed,
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .media-embed {
-  display: block !important;
-  width: 100% !important;
-  max-width: 100% !important;
+  display: block;
+  width: 100%;
+  max-width: 100%;
 }
 
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--center .bd-lore-figure--center {
@@ -314,6 +314,10 @@
   cursor: pointer;
 }
 
+.bd-statusbar--hidden {
+  display: none;
+}
+
 .bd-statusbar--clean {
   opacity: 0.85;
 }
@@ -329,6 +333,10 @@
 
 .bd-statusbar--unpublished {
   color: var(--text-muted);
+}
+
+.bd-setting-input-full {
+  width: 100%;
 }
 
 .bd-tag-checklist {

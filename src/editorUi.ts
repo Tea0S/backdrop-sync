@@ -123,9 +123,9 @@ async function resolveSourceToPublicUrl(
 
 class VaultMediaSuggestModal extends FuzzySuggestModal<TFile> {
   private files: TFile[];
-  private onPick: (file: TFile) => void;
+  private onPick: (file: TFile) => void | Promise<void>;
 
-  constructor(app: App, kind: "image" | "audio", onPick: (file: TFile) => void) {
+  constructor(app: App, kind: "image" | "audio", onPick: (file: TFile) => void | Promise<void>) {
     super(app);
     this.onPick = onPick;
     const allow = kind === "image" ? IMAGE_EXTS : AUDIO_EXTS;
@@ -142,7 +142,7 @@ class VaultMediaSuggestModal extends FuzzySuggestModal<TFile> {
   }
 
   onChooseItem(item: TFile): void {
-    this.onPick(item);
+    void Promise.resolve(this.onPick(item)).catch((e) => noticeError(e));
   }
 }
 
@@ -176,7 +176,7 @@ export class InsertImageModal extends Modal {
         text.setPlaceholder("Attachments/photo.png or https://…").setValue(this.source).onChange((v) => {
           this.source = v;
         });
-        text.inputEl.style.width = "100%";
+        text.inputEl.addClass("bd-setting-input-full");
       })
       .addButton((btn) =>
         btn.setButtonText("Vault…").onClick(() => {
@@ -199,10 +199,8 @@ export class InsertImageModal extends Modal {
         .addOption("right", "Right")
         .setValue(this.align)
         .onChange((v) => {
-          this.align = (["left", "center", "right"].includes(v) ? v : "center") as
-            | "left"
-            | "center"
-            | "right";
+          if (v === "left" || v === "center" || v === "right") this.align = v;
+          else this.align = "center";
         });
     });
 
@@ -504,7 +502,7 @@ export class ArticlePropertiesModal extends Modal {
         text.setPlaceholder("Alice, Bob").setValue(this.charactersText).onChange((v) => {
           this.charactersText = v;
         });
-        text.inputEl.style.width = "100%";
+        text.inputEl.addClass("bd-setting-input-full");
       });
 
     new Setting(contentEl)
@@ -608,7 +606,7 @@ export class ArticlePropertiesModal extends Modal {
       .setDesc("HTTPS URL or upload a vault image")
       .addText((text) => {
         text.setPlaceholder("https://…").setValue(value).onChange((v) => onChange(v));
-        text.inputEl.style.width = "100%";
+        text.inputEl.addClass("bd-setting-input-full");
       })
       .addButton((btn) =>
         btn.setButtonText("Upload…").onClick(() => {
@@ -680,9 +678,12 @@ export class ArticlePropertiesModal extends Modal {
       this.world,
       selfId,
       (entry) => {
-        const cache = this.app.metadataCache.getFileCache(
-          this.app.vault.getAbstractFileByPath(entry.path) as TFile
-        );
+        const abs = this.app.vault.getAbstractFileByPath(entry.path);
+        if (!(abs instanceof TFile)) {
+          new Notice("BackDrop: parent note not found in vault.");
+          return;
+        }
+        const cache = this.app.metadataCache.getFileCache(abs);
         const id = cache?.frontmatter?.backdrop_id;
         if (!id) {
           new Notice("BackDrop: parent note has no backdrop_id (publish it first).");
@@ -922,7 +923,7 @@ export class ResolveSyncModal extends Modal {
       .setName("Take remote")
       .setDesc("Force-pull this note from BackDrop (overwrites local edits).")
       .addButton((btn) =>
-        btn.setButtonText("Take remote").setWarning().onClick(async () => {
+        btn.setButtonText("Take remote").setDestructive().onClick(async () => {
           this.close();
           try {
             await pullCurrentNote(
