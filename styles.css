@@ -1,0 +1,457 @@
+/* BackDrop lore parity — mirrored from backdrop/client `.backdrop-lore .bd-lore-figure*` */
+
+.bd-lore-figure {
+  margin: 1em 0;
+  clear: both;
+  box-sizing: border-box;
+}
+
+.bd-lore-figure img,
+.bd-lore-figure .internal-embed img,
+.bd-lore-figure .image-embed img,
+.bd-lore-figure .media-embed img {
+  max-width: 100%;
+  width: auto;
+  height: auto;
+  display: block;
+  border-radius: 6px;
+}
+
+.bd-lore-figure--center {
+  text-align: center;
+  float: none;
+  clear: both;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+}
+
+.bd-lore-figure--center img,
+.bd-lore-figure--center .internal-embed img,
+.bd-lore-figure--center .image-embed img {
+  display: block;
+  margin-inline: auto;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+}
+
+.bd-lore-figure--left {
+  float: left;
+  clear: both;
+  max-width: min(50%, 22rem);
+  width: auto;
+  margin: 0.15em 1.1em 0.75em 0;
+}
+
+.bd-lore-figure--right {
+  float: right;
+  clear: both;
+  max-width: min(50%, 22rem);
+  width: auto;
+  margin: 0.15em 0 0.75em 1.1em;
+}
+
+/* BackDrop: floated figures force img to fill the capped float box. */
+.bd-lore-figure--left img,
+.bd-lore-figure--right img,
+.bd-lore-figure--left .internal-embed img,
+.bd-lore-figure--right .internal-embed img,
+.bd-lore-figure--left .image-embed img,
+.bd-lore-figure--right .image-embed img,
+.bd-lore-figure--left .media-embed img,
+.bd-lore-figure--right .media-embed img {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+}
+
+.bd-lore-figure figcaption {
+  font-size: 0.85em;
+  opacity: 0.8;
+  margin-top: 0.35em;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading view — beat theme `width:100%` embeds; keep float + text wrap.     */
+/* Only touch overflow when a BackDrop figure is present — never globally.    */
+/* -------------------------------------------------------------------------- */
+
+.markdown-preview-view:has(.bd-lore-figure) .markdown-preview-section,
+.markdown-reading-view:has(.bd-lore-figure) .markdown-preview-section {
+  overflow: visible;
+}
+
+.markdown-preview-view .bd-lore-figure--left,
+.markdown-reading-view .bd-lore-figure--left {
+  float: left !important;
+  clear: both;
+  display: block !important;
+  width: auto !important;
+  max-width: min(50%, 22rem) !important;
+  margin: 0.15em 1.1em 0.75em 0 !important;
+}
+
+.markdown-preview-view .bd-lore-figure--right,
+.markdown-reading-view .bd-lore-figure--right {
+  float: right !important;
+  clear: both;
+  display: block !important;
+  width: auto !important;
+  max-width: min(50%, 22rem) !important;
+  margin: 0.15em 0 0.75em 1.1em !important;
+}
+
+.markdown-preview-view .bd-lore-figure--left img,
+.markdown-preview-view .bd-lore-figure--right img,
+.markdown-reading-view .bd-lore-figure--left img,
+.markdown-reading-view .bd-lore-figure--right img,
+.markdown-preview-view .bd-lore-figure--left .internal-embed,
+.markdown-preview-view .bd-lore-figure--right .internal-embed,
+.markdown-preview-view .bd-lore-figure--left .image-embed,
+.markdown-preview-view .bd-lore-figure--right .image-embed,
+.markdown-preview-view .bd-lore-figure--left .media-embed,
+.markdown-preview-view .bd-lore-figure--right .media-embed,
+.markdown-reading-view .bd-lore-figure--left .internal-embed,
+.markdown-reading-view .bd-lore-figure--right .internal-embed,
+.markdown-reading-view .bd-lore-figure--left .image-embed,
+.markdown-reading-view .bd-lore-figure--right .image-embed,
+.markdown-reading-view .bd-lore-figure--left .media-embed,
+.markdown-reading-view .bd-lore-figure--right .media-embed {
+  display: block !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+.markdown-preview-view .bd-lore-figure--center,
+.markdown-reading-view .bd-lore-figure--center {
+  display: block !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  text-align: center;
+  float: none !important;
+  clear: both !important;
+  margin: 1em 0 !important;
+}
+
+/* Clearfix after a float so following block headings don't sit beside it oddly
+   when themes force heading display:block with full measure — paragraphs still wrap. */
+.markdown-preview-view .bd-lore-figure--left + h1,
+.markdown-preview-view .bd-lore-figure--left + h2,
+.markdown-preview-view .bd-lore-figure--left + h3,
+.markdown-preview-view .bd-lore-figure--right + h1,
+.markdown-preview-view .bd-lore-figure--right + h2,
+.markdown-preview-view .bd-lore-figure--right + h3,
+.markdown-reading-view .bd-lore-figure--left + h1,
+.markdown-reading-view .bd-lore-figure--left + h2,
+.markdown-reading-view .bd-lore-figure--left + h3,
+.markdown-reading-view .bd-lore-figure--right + h1,
+.markdown-reading-view .bd-lore-figure--right + h2,
+.markdown-reading-view .bd-lore-figure--right + h3 {
+  clear: both;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Live Preview: float the CM line (closest match to HTML float in lore).     */
+/* Width matches `.backdrop-lore .bd-lore-figure--left|right` (not fit-content) */
+/* so text wrap strength matches Reading / backdrop.quest.                    */
+/*                                                                            */
+/* NEVER set overflow on `.cm-scroller` / `.cm-content` — that is the scroll   */
+/* container for ALL markdown Live Preview notes (broke scrolling in 0.1.4).  */
+/* Float rules below are scoped to `.bd-lore-lp-line--*` only.                 */
+/* -------------------------------------------------------------------------- */
+
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right {
+  box-sizing: border-box;
+  width: min(50%, 22rem) !important;
+  max-width: min(50%, 22rem) !important;
+}
+
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left {
+  float: left;
+  clear: both;
+  margin: 0.15em 1.1em 0.75em 0;
+}
+
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right {
+  float: right;
+  clear: both;
+  margin: 0.15em 0 0.75em 1.1em;
+}
+
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--center {
+  float: none;
+  clear: both;
+  width: 100%;
+  max-width: 100%;
+  text-align: center;
+  margin: 1em 0;
+}
+
+/* Figure inside floated LP line: don't double-float; fill the capped line. */
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .bd-lore-figure--left,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .bd-lore-figure--right {
+  float: none !important;
+  clear: none !important;
+  display: block;
+  margin: 0 !important;
+  max-width: 100% !important;
+  width: 100% !important;
+}
+
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .bd-lore-figure--left img,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .bd-lore-figure--right img,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .internal-embed img,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .internal-embed img,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .image-embed img,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .image-embed img {
+  display: block !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .internal-embed,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .internal-embed,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .image-embed,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .image-embed,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left .media-embed,
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right .media-embed {
+  display: block !important;
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--center .bd-lore-figure--center {
+  display: block;
+  float: none;
+  clear: both;
+  margin: 0 auto;
+  max-width: 100%;
+  width: 100%;
+  text-align: center;
+}
+
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--center .bd-lore-figure--center img {
+  display: block;
+  margin-inline: auto;
+  max-width: 100%;
+  width: auto;
+  height: auto;
+}
+
+/* Collapse split `{align=…}` lines so they don't leave a blank CM row. */
+.markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--token-only {
+  float: none !important;
+  clear: none !important;
+  width: 0 !important;
+  max-width: 0 !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  overflow: hidden !important;
+  line-height: 0 !important;
+  font-size: 0 !important;
+}
+
+.markdown-source-view.mod-cm6 .bd-lore-align-hidden,
+.markdown-source-view.mod-cm6 .cm-line .bd-lore-align-hidden {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  overflow: hidden !important;
+  font-size: 0 !important;
+  line-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+}
+
+.bd-lore-audio {
+  margin: 1em 0;
+}
+
+.bd-lore-audio audio {
+  width: 100%;
+  max-width: 480px;
+}
+
+.bd-discord-spoiler {
+  background: var(--text-normal);
+  color: transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0 0.15em;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.bd-discord-spoiler.is-revealed {
+  background: transparent;
+  color: inherit;
+}
+
+.bd-timeline-embed-stub {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 0.75em 1em;
+  margin: 1em 0;
+  background: var(--background-secondary);
+}
+
+.bd-timeline-embed-stub pre {
+  white-space: pre-wrap;
+  font-size: 0.8em;
+  opacity: 0.85;
+}
+
+/* Sync status badge */
+.bd-statusbar {
+  cursor: pointer;
+}
+
+.bd-statusbar--clean {
+  opacity: 0.85;
+}
+
+.bd-statusbar--dirty {
+  color: var(--text-warning);
+}
+
+.bd-statusbar--conflict {
+  color: var(--text-error);
+  font-weight: 600;
+}
+
+.bd-statusbar--unpublished {
+  color: var(--text-muted);
+}
+
+.bd-tag-checklist {
+  margin: 0.75em 0 1em;
+  max-height: 240px;
+  overflow: auto;
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 0.5em;
+}
+
+.bd-tag-checklist .setting-item {
+  border: none;
+  padding: 0.25em 0;
+}
+
+/* Compact format bar on BackDrop notes */
+.bd-format-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2em;
+  margin-right: 0.5em;
+  flex-wrap: wrap;
+}
+
+.bd-format-btn {
+  font-size: 0.75em;
+  padding: 0.15em 0.45em;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.bd-format-btn:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+/* Conflict compare panes */
+.bd-conflict-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75em;
+  margin: 0.75em 0 1em;
+}
+
+@media (max-width: 720px) {
+  .bd-conflict-compare {
+    grid-template-columns: 1fr;
+  }
+}
+
+.bd-conflict-pane h3 {
+  margin: 0 0 0.35em;
+  font-size: 0.9em;
+}
+
+.bd-conflict-textarea {
+  width: 100%;
+  min-height: 12em;
+  font-family: var(--font-monospace);
+  font-size: 0.8em;
+  resize: vertical;
+  background: var(--background-primary-alt);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 0.5em;
+  color: var(--text-normal);
+}
+
+/* Video embeds (reading view) */
+.bd-lore-video {
+  margin: 1em 0;
+  clear: both;
+}
+
+.bd-lore-video-frame {
+  position: relative;
+  width: 100%;
+  max-width: 40rem;
+  aspect-ratio: 16 / 9;
+  background: var(--background-secondary);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.bd-lore-video-frame iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+/* Lore tables — reading view only; do not touch .cm-scroller */
+.markdown-preview-view table.bd-lore-table,
+.markdown-reading-view table.bd-lore-table,
+.markdown-preview-view table,
+.markdown-reading-view table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+  font-size: 0.95em;
+}
+
+.markdown-preview-view table th,
+.markdown-preview-view table td,
+.markdown-reading-view table th,
+.markdown-reading-view table td {
+  border: 1px solid var(--background-modifier-border);
+  padding: 0.4em 0.65em;
+  text-align: left;
+}
+
+.markdown-preview-view table th,
+.markdown-reading-view table th {
+  background: var(--background-secondary);
+  font-weight: 600;
+}
+
+.markdown-preview-view table tr:nth-child(even) td,
+.markdown-reading-view table tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--background-secondary) 45%, transparent);
+}
