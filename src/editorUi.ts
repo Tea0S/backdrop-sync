@@ -10,11 +10,12 @@ import {
 } from "obsidian";
 import type { BackdropClient } from "./api";
 import { noticeError } from "./api";
-import { buildNoteFile, hashContent, splitFrontmatter } from "./frontmatter";
+import { buildNoteFile, frontmatterRecord, hashContent, splitFrontmatter } from "./frontmatter";
 import { alignedImageMarkdown, audioMarkdown } from "./markdown";
 import {
   clearConflictPath,
   getSyncBadgeState,
+  normalizePublishStatusForType,
   pullCurrentNote,
   publishFile,
   upsertCatalogCategory,
@@ -68,8 +69,7 @@ export function resolveWorldSlug(
   fallback: string
 ): string {
   if (file) {
-    const cache = app.metadataCache.getFileCache(file);
-    const fromFm = cache?.frontmatter?.backdrop_world;
+    const fromFm = frontmatterRecord(app.metadataCache.getFileCache(file))?.backdrop_world;
     if (fromFm != null && String(fromFm).trim()) return String(fromFm).trim();
   }
   return fallback;
@@ -524,7 +524,7 @@ export class ArticlePropertiesModal extends Modal {
     const pins = this.catalog?.pins || [];
     if (pins.length) {
       const pinBox = contentEl.createDiv({ cls: "bd-tag-checklist" });
-      pinBox.createEl("div", { text: "Linked pins", cls: "setting-item-name" });
+      new Setting(pinBox).setName("Linked pins").setHeading();
       for (const pin of pins.slice(0, 80)) {
         new Setting(pinBox).setName(pin.name || pin.id).addToggle((toggle) => {
           toggle.setValue(this.selectedPinIds.has(pin.id));
@@ -545,7 +545,7 @@ export class ArticlePropertiesModal extends Modal {
     const regions = this.catalog?.regions || [];
     if (regions.length) {
       const regionBox = contentEl.createDiv({ cls: "bd-tag-checklist" });
-      regionBox.createEl("div", { text: "Linked regions", cls: "setting-item-name" });
+      new Setting(regionBox).setName("Linked regions").setHeading();
       for (const region of regions.slice(0, 80)) {
         new Setting(regionBox).setName(region.name || region.id).addToggle((toggle) => {
           toggle.setValue(this.selectedRegionIds.has(region.id));
@@ -684,7 +684,7 @@ export class ArticlePropertiesModal extends Modal {
           return;
         }
         const cache = this.app.metadataCache.getFileCache(abs);
-        const id = cache?.frontmatter?.backdrop_id;
+        const id = frontmatterRecord(cache)?.backdrop_id;
         if (!id) {
           new Notice("BackDrop: parent note has no backdrop_id (publish it first).");
           return;
@@ -828,6 +828,7 @@ export class ResolveSyncModal extends Modal {
   private localBody = "";
   private remoteBody = "";
   private remoteLoading = false;
+  private localStatus = "draft";
 
   constructor(
     app: App,
@@ -846,9 +847,13 @@ export class ResolveSyncModal extends Modal {
     const content = await this.app.vault.read(this.file);
     const { body, data } = splitFrontmatter(content);
     this.localBody = body || "";
+    this.localStatus = normalizePublishStatusForType(
+      String(data.backdrop_type || ""),
+      data.status
+    );
     this.render();
 
-    if (this.state === "conflict") {
+    if (this.state === "conflict" || this.state === "dirty") {
       this.remoteLoading = true;
       this.render();
       try {
@@ -880,13 +885,16 @@ export class ResolveSyncModal extends Modal {
     contentEl.empty();
     contentEl.createEl("h2", { text: "Resolve sync" });
     contentEl.createEl("p", {
-      text: `Status: ${this.state} · ${this.file.path}`,
+      text: `Status: ${this.state} · local visibility: ${this.localStatus} · ${this.file.path}`,
       cls: "setting-item-description",
     });
 
-    if (this.state === "conflict") {
+    if (this.state === "conflict" || this.state === "dirty") {
       contentEl.createEl("p", {
-        text: "Local edits conflict with remote. Compare excerpts, then keep local, take remote, or force-publish local.",
+        text:
+          this.state === "conflict"
+            ? "Remote changed while you have local edits. Keep local, take remote, or sync local (choose status before push)."
+            : "Local edits not yet pushed. Keep working, take remote (overwrite), or sync local (choose status before push).",
         cls: "setting-item-description",
       });
 
@@ -908,7 +916,7 @@ export class ResolveSyncModal extends Modal {
 
     new Setting(contentEl)
       .setName("Keep local")
-      .setDesc("Clear the conflict flag. Local content stays; publish when ready.")
+      .setDesc("Clear the conflict flag. Local content stays; sync when ready.")
       .addButton((btn) =>
         btn.setButtonText("Keep local").onClick(async () => {
           clearConflictPath(this.settings, this.file.path);
@@ -923,7 +931,7 @@ export class ResolveSyncModal extends Modal {
       .setName("Take remote")
       .setDesc("Force-pull this note from BackDrop (overwrites local edits).")
       .addButton((btn) =>
-        btn.setButtonText("Take remote").setDestructive().onClick(async () => {
+        btn.setButtonText("Take remote").setWarning().onClick(async () => {
           this.close();
           try {
             await pullCurrentNote(
@@ -942,22 +950,304 @@ export class ResolveSyncModal extends Modal {
       );
 
     new Setting(contentEl)
-      .setName("Publish local (force)")
-      .setDesc("Overwrite remote with this note, ignoring remote updated_at.")
+      .setName("Sync local (force)")
+      .setDesc("Choose status, then overwrite remote with this note.")
       .addButton((btn) =>
-        btn.setButtonText("Publish local").setCta().onClick(async () => {
+        btn.setButtonText("Sync local…").setCta().onClick(() => {
           this.close();
-          try {
-            await publishFile(this.app, this.client, this.file, this.settings, this.saveSettings, {
-              force: true,
-              slugIndex: this.slugIndex,
-            });
-          } catch (e) {
-            noticeError(e);
-          }
-          this.onAfter();
+          new SyncConfirmModal(
+            this.app,
+            this.file,
+            this.settings,
+            this.saveSettings,
+            this.client,
+            this.slugIndex,
+            { force: true, onDone: () => this.onAfter() }
+          ).open();
         })
       );
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/**
+ * Pre-sync confirmation (Obsidian Sync–panel inspired).
+ * Choose visibility status before pushing; Sync ≠ “set published”.
+ */
+export class SyncConfirmModal extends Modal {
+  private titleText = "";
+  private world = "";
+  private type = "wiki";
+  private status = "draft";
+  private articleSource = "";
+  private discordSyncEnabled = false;
+  private showDiscord = false;
+  private busy = false;
+
+  constructor(
+    app: App,
+    private file: TFile,
+    private settings: BackdropSettings,
+    private saveSettings: () => Promise<void>,
+    private client: BackdropClient,
+    private slugIndex: WikiSlugIndex,
+    private opts: { force?: boolean; onDone?: () => void } = {}
+  ) {
+    super(app);
+  }
+
+  async onOpen() {
+    const content = await this.app.vault.read(this.file);
+    const { data } = splitFrontmatter(content);
+    this.type = String(data.backdrop_type || "");
+    this.world = String(data.backdrop_world || "").trim();
+    this.titleText = String(data.title || this.file.basename).trim() || this.file.basename;
+    this.status = normalizePublishStatusForType(this.type, data.status);
+    this.articleSource = String(data.backdrop_source || "").trim();
+    this.showDiscord = this.type === "wiki" && this.articleSource !== "pin";
+    this.discordSyncEnabled = this.showDiscord
+      ? data.discord_sync_enabled === true || data.discord_sync_enabled === "true"
+      : false;
+
+    if (this.type !== "wiki" && this.type !== "timeline") {
+      new Notice("BackDrop: note is missing backdrop_type (wiki/timeline).");
+      this.close();
+      return;
+    }
+    if (!this.world) {
+      new Notice("BackDrop: note is missing backdrop_world.");
+      this.close();
+      return;
+    }
+    this.render();
+  }
+
+  private render() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("bd-sync-confirm");
+
+    contentEl.createEl("h2", { text: "Sync to BackDrop" });
+    contentEl.createEl("p", {
+      text: "Push this note to BackDrop. Status controls visibility — Sync does not mean Published.",
+      cls: "setting-item-description",
+    });
+
+    const meta = contentEl.createDiv({ cls: "bd-sync-confirm-meta" });
+    const rows: Array<[string, string]> = [
+      ["Note", this.titleText],
+      ["World", this.world],
+      ["Type", this.type === "timeline" ? "Timeline" : "Wiki"],
+    ];
+    if (this.opts.force) {
+      rows.push(["Mode", "Force (overwrite remote)"]);
+    }
+    for (const [label, value] of rows) {
+      const row = meta.createDiv({ cls: "bd-sync-confirm-row" });
+      row.createSpan({ text: label, cls: "bd-sync-confirm-label" });
+      row.createSpan({ text: value, cls: "bd-sync-confirm-value" });
+    }
+
+    const statusOptions =
+      this.type === "timeline"
+        ? [
+            ["draft", "Draft"],
+            ["published", "Published"],
+          ]
+        : [
+            ["draft", "Draft"],
+            ["unlisted", "Unlisted"],
+            ["published", "Published"],
+          ];
+
+    new Setting(contentEl)
+      .setName("Status")
+      .setDesc("Visibility on BackDrop after this sync.")
+      .addDropdown((dd) => {
+        for (const [value, label] of statusOptions) dd.addOption(value, label);
+        dd.setValue(this.status).onChange((v) => {
+          this.status = normalizePublishStatusForType(this.type, v);
+        });
+      });
+
+    if (this.showDiscord) {
+      new Setting(contentEl)
+        .setName("Publish to Discord")
+        .setDesc("When status is Published, sync this article to your Discord forum.")
+        .addToggle((toggle) => {
+          toggle.setValue(this.discordSyncEnabled).onChange((on) => {
+            this.discordSyncEnabled = on;
+          });
+        });
+    }
+
+    new Setting(contentEl)
+      .addButton((btn) =>
+        btn.setButtonText("Cancel").onClick(() => {
+          this.close();
+        })
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText(this.opts.force ? "Force sync" : "Sync to BackDrop")
+          .setCta()
+          .setDisabled(this.busy)
+          .onClick(() => {
+            void this.confirm();
+          })
+      );
+  }
+
+  private async confirm() {
+    if (this.busy) return;
+    this.busy = true;
+    this.render();
+    try {
+      await this.writeChoicesIfNeeded();
+      await publishFile(this.app, this.client, this.file, this.settings, this.saveSettings, {
+        force: this.opts.force === true,
+        slugIndex: this.slugIndex,
+      });
+      this.close();
+      this.opts.onDone?.();
+    } catch (e) {
+      noticeError(e);
+      this.busy = false;
+      this.render();
+    }
+  }
+
+  /** Persist status / discord flag into frontmatter before publishFile reads them. */
+  private async writeChoicesIfNeeded() {
+    const latest = await this.app.vault.read(this.file);
+    const parsed = splitFrontmatter(latest);
+    const currentStatus = normalizePublishStatusForType(this.type, parsed.data.status);
+    const currentDiscord =
+      this.showDiscord &&
+      (parsed.data.discord_sync_enabled === true || parsed.data.discord_sync_enabled === "true");
+    const statusChanged = currentStatus !== this.status;
+    const discordChanged = this.showDiscord && currentDiscord !== this.discordSyncEnabled;
+    if (!statusChanged && !discordChanged) return;
+
+    const fm: Record<string, unknown> = { ...parsed.data, status: this.status };
+    if (this.showDiscord) fm.discord_sync_enabled = this.discordSyncEnabled;
+    const next = buildNoteFile(fm, parsed.body);
+    await this.app.vault.modify(this.file, next);
+    // Leave hash dirty so pull still skips overwrite until sync completes.
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/** Bulk pending sync: confirm count, keep each note’s frontmatter status. */
+export class BulkSyncConfirmModal extends Modal {
+  constructor(
+    app: App,
+    private pendingCount: number,
+    private onConfirm: () => void | Promise<void>
+  ) {
+    super(app);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("bd-sync-confirm");
+    contentEl.createEl("h2", { text: "Sync pending notes" });
+    contentEl.createEl("p", {
+      text: `Push ${this.pendingCount} note${this.pendingCount === 1 ? "" : "s"} with their current statuses?`,
+      cls: "setting-item-description",
+    });
+    contentEl.createEl("p", {
+      text: "Each note keeps its frontmatter status (draft / unlisted / published). Open Sync on a single note to change status first.",
+      cls: "setting-item-description",
+    });
+    new Setting(contentEl)
+      .addButton((btn) =>
+        btn.setButtonText("Cancel").onClick(() => {
+          this.close();
+        })
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText(`Sync ${this.pendingCount} notes`)
+          .setCta()
+          .onClick(async () => {
+            this.close();
+            await this.onConfirm();
+          })
+      );
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/** List notes marked conflict after a safe pull; open Resolve sync per path. */
+export class ConflictListModal extends Modal {
+  constructor(
+    app: App,
+    private settings: BackdropSettings,
+    private saveSettings: () => Promise<void>,
+    private onResolveNote: (file: TFile) => void,
+    private paths?: string[]
+  ) {
+    super(app);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Sync conflicts" });
+    contentEl.createEl("p", {
+      text: "These notes have local edits that were not overwritten by pull. Choose Keep local, Take remote, or Sync local for each.",
+      cls: "setting-item-description",
+    });
+
+    const listed = (this.paths?.length ? this.paths : this.settings.conflictPaths || []).map(
+      (p) => normalizePath(p)
+    );
+    const unique = [...new Set(listed)];
+
+    if (!unique.length) {
+      contentEl.createEl("p", { text: "No conflicts right now." });
+      return;
+    }
+
+    const list = contentEl.createDiv({ cls: "bd-conflict-list" });
+    for (const path of unique) {
+      const row = list.createDiv({ cls: "bd-conflict-list-row" });
+      const file = this.app.vault.getAbstractFileByPath(path);
+      const label = row.createDiv({ cls: "bd-conflict-list-path" });
+      label.setText(path);
+      if (!(file instanceof TFile)) {
+        label.addClass("bd-conflict-list-missing");
+        new Setting(row).addButton((btn) =>
+          btn.setButtonText("Dismiss").onClick(async () => {
+            clearConflictPath(this.settings, path);
+            await this.saveSettings();
+            this.onOpen();
+          })
+        );
+        continue;
+      }
+      new Setting(row).addButton((btn) =>
+        btn.setButtonText("Resolve…").setCta().onClick(() => {
+          this.close();
+          this.onResolveNote(file);
+        })
+      );
+    }
+
+    new Setting(contentEl).addButton((btn) =>
+      btn.setButtonText("Close").onClick(() => this.close())
+    );
   }
 
   onClose() {

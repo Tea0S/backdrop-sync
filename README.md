@@ -26,7 +26,8 @@ The status bar shows sync state for the active note: **Clean** / **Dirty** / **C
 | **Insert audio** | Same upload/path flow; inserts `[label](url)`. |
 | **Insert wikilink** | Fuzzy-search the wiki slug index by title; inserts `[[Note Title]]` or `[[Note Title\|label]]` when text was selected. |
 | **Article properties** | Status, category (with **New…** create), Publish to Discord (wiki, non-pin), characters, parent article, linked pins/regions, thumbnail (wiki) or header image (timeline). Categories/pins/regions come from the last pull cache. |
-| **Resolve sync…** | On conflict: side-by-side local vs remote body excerpts. Keep local, take remote (force pull), or publish local (force). |
+| **Resolve sync…** | On conflict/dirty: side-by-side local vs remote. Keep local, take remote (force pull), or publish local (pushes with frontmatter status). |
+| **Review sync conflicts** | Lists notes skipped as dirty on pull; open Resolve per note. |
 
 Pull caches each world’s categories, pins, regions, lanes, and eras in plugin data. On publish, pin/region ids, characters, parent, thumbnail, and `discord_sync_enabled` are sent when present.
 
@@ -37,16 +38,18 @@ Pulls respect the worlds checklist (wiki / timeline facets). If you turn every w
 | Action | Behavior |
 |--------|----------|
 | **Pull on startup** | Creates missing notes only; never overwrites existing files |
-| **Pull from BackDrop** (command / ribbon) | Creates missing; updates non-dirty remote-newer notes; skips local edits and marks them **Conflict** |
-| **Pull current note from BackDrop** | Overwrites the active note from the server even if dirty (with a notice) |
+| **Pull updates** (command / ribbon) | Creates missing; updates clean remote-newer notes; **never overwrites dirty/local draft work** — marks **Conflict** and opens the conflict list |
+| **Pull current note** / Resolve → Take remote | Overwrites that note from the server (explicit) |
+
+Publish pushes the note to the API and **preserves frontmatter `status`** (`draft` / `unlisted` / `published`). Missing status defaults to `draft`. Publish does **not** mean “set published”.
 
 ## Commands
 
-- **Pull from BackDrop** / **Pull current note from BackDrop**
+- **Pull updates** / **Pull current note**
 - **Publish current note** / **Force publish current note** / **Publish all pending**
 - **New wiki article** / **New timeline event**
 - **Insert image** / **Insert audio** / **Wrap selection as spoiler** / **Insert timeline embed stub** / **Insert wikilink**
-- **Article properties** / **Resolve sync…**
+- **Article properties** / **Resolve sync…** / **Review sync conflicts**
 
 ## Aligned images
 

@@ -82,45 +82,46 @@
   overflow: visible;
 }
 
-.markdown-preview-view .bd-lore-figure--left,
-.markdown-reading-view .bd-lore-figure--left {
+/* Reading view — beat theme width:100% embeds via higher specificity (no !important on width). */
+.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--left,
+.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--left {
   float: left !important;
   clear: both;
   display: block;
-  width: auto !important;
-  max-width: min(50%, 22rem) !important;
+  width: auto;
+  max-width: min(50%, 22rem);
   margin: 0.15em 1.1em 0.75em 0;
 }
 
-.markdown-preview-view .bd-lore-figure--right,
-.markdown-reading-view .bd-lore-figure--right {
+.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--right,
+.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--right {
   float: right !important;
   clear: both;
   display: block;
-  width: auto !important;
-  max-width: min(50%, 22rem) !important;
+  width: auto;
+  max-width: min(50%, 22rem);
   margin: 0.15em 0 0.75em 1.1em;
 }
 
-.markdown-preview-view .bd-lore-figure--left img,
-.markdown-preview-view .bd-lore-figure--right img,
-.markdown-reading-view .bd-lore-figure--left img,
-.markdown-reading-view .bd-lore-figure--right img,
-.markdown-preview-view .bd-lore-figure--left .internal-embed,
-.markdown-preview-view .bd-lore-figure--right .internal-embed,
-.markdown-preview-view .bd-lore-figure--left .image-embed,
-.markdown-preview-view .bd-lore-figure--right .image-embed,
-.markdown-preview-view .bd-lore-figure--left .media-embed,
-.markdown-preview-view .bd-lore-figure--right .media-embed,
-.markdown-reading-view .bd-lore-figure--left .internal-embed,
-.markdown-reading-view .bd-lore-figure--right .internal-embed,
-.markdown-reading-view .bd-lore-figure--left .image-embed,
-.markdown-reading-view .bd-lore-figure--right .image-embed,
-.markdown-reading-view .bd-lore-figure--left .media-embed,
-.markdown-reading-view .bd-lore-figure--right .media-embed {
+.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--left img,
+.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--right img,
+.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--left img,
+.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--right img,
+.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--left .internal-embed,
+.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--right .internal-embed,
+.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--left .image-embed,
+.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--right .image-embed,
+.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--left .media-embed,
+.markdown-preview-view.bd-has-lore-figures .bd-lore-figure--right .media-embed,
+.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--left .internal-embed,
+.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--right .internal-embed,
+.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--left .image-embed,
+.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--right .image-embed,
+.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--left .media-embed,
+.markdown-reading-view.bd-has-lore-figures .bd-lore-figure--right .media-embed {
   display: block;
-  width: 100% !important;
-  max-width: 100% !important;
+  width: 100%;
+  max-width: 100%;
   height: auto;
 }
 
@@ -165,8 +166,8 @@
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left,
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--right {
   box-sizing: border-box;
-  width: min(50%, 22rem) !important;
-  max-width: min(50%, 22rem) !important;
+  width: min(50%, 22rem);
+  max-width: min(50%, 22rem);
 }
 
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--left {
@@ -244,32 +245,25 @@
 
 /* Collapse split `{align=…}` lines so they don't leave a blank CM row. */
 .markdown-source-view.mod-cm6 .cm-line.bd-lore-lp-line--token-only {
-  float: none !important;
-  clear: none !important;
-  width: 0 !important;
-  max-width: 0 !important;
-  height: 0 !important;
-  min-height: 0 !important;
-  max-height: 0 !important;
-  margin: 0 !important;
-  padding: 0 !important;
-  border: 0 !important;
-  overflow: hidden !important;
-  line-height: 0 !important;
-  font-size: 0 !important;
+  float: none;
+  clear: none;
+  display: none;
+  width: 0;
+  max-width: 0;
+  height: 0;
+  min-height: 0;
+  max-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  line-height: 0;
+  font-size: 0;
 }
 
 .markdown-source-view.mod-cm6 .bd-lore-align-hidden,
 .markdown-source-view.mod-cm6 .cm-line .bd-lore-align-hidden {
-  display: none !important;
-  width: 0 !important;
-  height: 0 !important;
-  overflow: hidden !important;
-  font-size: 0 !important;
-  line-height: 0 !important;
-  margin: 0 !important;
-  padding: 0 !important;
-  border: 0 !important;
+  display: none;
 }
 
 .bd-lore-audio {
@@ -409,6 +403,48 @@
   color: var(--text-normal);
 }
 
+.bd-notice-actions {
+  margin-top: 0.5em;
+}
+
+.bd-notice-actions button {
+  cursor: pointer;
+}
+
+.bd-conflict-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+  margin: 0.75em 0 1em;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.bd-conflict-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75em;
+  padding: 0.35em 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.bd-conflict-list-row .setting-item {
+  border: none;
+  padding: 0;
+}
+
+.bd-conflict-list-path {
+  font-size: 0.85em;
+  word-break: break-all;
+  flex: 1;
+}
+
+.bd-conflict-list-missing {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
 /* Video embeds (reading view) */
 .bd-lore-video {
   margin: 1em 0;
@@ -462,4 +498,58 @@
 .markdown-preview-view table tr:nth-child(even) td,
 .markdown-reading-view table tr:nth-child(even) td {
   background: color-mix(in srgb, var(--background-secondary) 45%, transparent);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Hide internal sync metadata from Properties (reading + live preview).      */
+/* Keys still exist in YAML for sync; edit status/category via article modal. */
+/* -------------------------------------------------------------------------- */
+
+.metadata-property[data-property-key="backdrop_id"],
+.metadata-property[data-property-key="backdrop_updated_at"],
+.metadata-property[data-property-key="backdrop_synced_at"],
+.metadata-property[data-property-key="backdrop_type"],
+.metadata-property[data-property-key="backdrop_world"],
+.metadata-property[data-property-key="backdrop_slug"],
+.metadata-property[data-property-key="backdrop_source"],
+.metadata-property[data-property-key="location_pin_ids"],
+.metadata-property[data-property-key="map_region_ids"],
+.metadata-property[data-property-key="parent_article_id"],
+.metadata-property[data-property-key="character_muse_ids"],
+.metadata-property[data-property-key="thumbnail_url"],
+.metadata-property[data-property-key="header_image_url"] {
+  display: none;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Sync confirm modal (pre-publish status panel)                              */
+/* -------------------------------------------------------------------------- */
+
+.bd-sync-confirm .bd-sync-confirm-meta {
+  margin: 0.75em 0 1em;
+  padding: 0.65em 0.85em;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.bd-sync-confirm .bd-sync-confirm-row {
+  display: flex;
+  gap: 0.75em;
+  align-items: baseline;
+  padding: 0.2em 0;
+}
+
+.bd-sync-confirm .bd-sync-confirm-label {
+  flex: 0 0 4.5em;
+  font-size: 0.85em;
+  opacity: 0.7;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.bd-sync-confirm .bd-sync-confirm-value {
+  flex: 1;
+  font-weight: 550;
+  overflow-wrap: anywhere;
 }

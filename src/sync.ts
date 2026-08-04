@@ -1,6 +1,31 @@
 import { App, Notice, TFile, normalizePath } from "obsidian";
 import type { BackdropClient } from "./api";
 import { BackdropApiError, noticeError, sleepMs } from "./api";
+import {
+  buildNoteFile,
+  frontmatterRecord,
+  hashContent,
+  parseWorldSlugs,
+  splitFrontmatter,
+  timelineFrontmatterFromEvent,
+  timelineNotePath,
+  wikiFrontmatterFromArticle,
+  wikiNotePath,
+  worldTimelineRoot,
+  worldWikiRoot,
+  slugify,
+  safePathSegment,
+} from "./frontmatter";
+import type { BackdropSettings, PullPack, SyncBadgeState, WorldCatalogMeta } from "./types";
+import { normalizeWikiBodyForVault } from "./markdown";
+import { resolvePullTargets } from "./syncSelection";
+import {
+  WikiSlugIndex,
+  rebuildWikiSlugIndex,
+  rewriteObsidianToSlugs,
+  rewriteSlugsToObsidian,
+  scanWikiSlugIndex,
+} from "./wikiLinks";
 
 /** Max concurrent world pulls (API rate limits + avoid stampeding). */
 const PULL_CONCURRENCY = 2;
@@ -32,31 +57,6 @@ async function mapPool<T, R>(
   await Promise.all(Array.from({ length: n }, () => worker()));
   return results;
 }
-import {
-  buildNoteFile,
-  hashContent,
-  parseWorldSlugs,
-  splitFrontmatter,
-  timelineFrontmatterFromEvent,
-  timelineNotePath,
-  wikiFrontmatterFromArticle,
-  wikiNotePath,
-  worldTimelineRoot,
-  worldWikiRoot,
-  slugify,
-  safePathSegment,
-} from "./frontmatter";
-import type { BackdropSettings, PullPack, SyncBadgeState, WorldCatalogMeta } from "./types";
-import { normalizeWikiBodyForVault } from "./markdown";
-import { resolvePullTargets } from "./syncSelection";
-import {
-  WikiSlugIndex,
-  rebuildWikiSlugIndex,
-  rewriteObsidianToSlugs,
-  rewriteSlugsToObsidian,
-  scanWikiSlugIndex,
-} from "./wikiLinks";
-
 export type { SyncBadgeState };
 
 export function cacheWorldCatalog(settings: BackdropSettings, worldSlug: string, pack: PullPack): void {
@@ -114,12 +114,12 @@ export function charactersPayloadFromFrontmatter(data: Record<string, unknown>):
   museId?: string | null;
 }> | undefined {
   if (!Array.isArray(data.characters)) return undefined;
-  const museIds = Array.isArray(data.character_muse_ids) ? data.character_muse_ids : [];
+  const museIds: unknown[] = Array.isArray(data.character_muse_ids) ? data.character_muse_ids : [];
   const out: Array<{ characterName: string; museId?: string | null }> = [];
   for (let i = 0; i < data.characters.length; i++) {
-    const name = String(data.characters[i] || "").trim();
+    const name = String(data.characters[i] ?? "").trim();
     if (!name) continue;
-    const museRaw = museIds[i];
+    const museRaw: unknown = museIds[i];
     const museId =
       museRaw != null && String(museRaw).trim() ? String(museRaw).trim() : null;
     out.push(museId ? { characterName: name, museId } : { characterName: name });
@@ -251,6 +251,8 @@ export interface PullOptions {
   syncWiki?: boolean;
   /** Pull timeline events for this world (default true). */
   syncTimeline?: boolean;
+  /** Invoked from the pull Notice “Review conflicts” button. */
+  onReviewConflicts?: (paths: string[]) => void;
 }
 
 export interface SyncStats {
@@ -305,6 +307,48 @@ export async function fileIsDirty(app: App, file: TFile, settings: BackdropSetti
   const prev = settings.contentHashes[normalizePath(file.path)];
   if (!prev) return false;
   return hashContent(content) !== prev;
+}
+
+/** Frontmatter visibility for API push — Sync means push, not “set published”. */
+export function normalizePublishStatus(raw: unknown): string {
+  const s = String(raw ?? "draft").trim().toLowerCase();
+  if (s === "published" || s === "unlisted" || s === "draft") return s;
+  return "draft";
+}
+
+/** Clamp status to options allowed for the note type (timeline has no unlisted). */
+export function normalizePublishStatusForType(type: string, raw: unknown): string {
+  const s = normalizePublishStatus(raw);
+  if (type === "timeline" && s === "unlisted") return "draft";
+  return s;
+}
+
+/**
+ * True when full/startup pull must not overwrite this note.
+ * Protects hash-dirty notes and unhashed notes whose body differs from remote.
+ */
+async function isProtectedFromOverwrite(
+  app: App,
+  file: TFile,
+  settings: BackdropSettings,
+  remoteBody: string
+): Promise<{ protected: boolean; dirty: boolean }> {
+  const dirty = await fileIsDirty(app, file, settings);
+  if (dirty) return { protected: true, dirty: true };
+  const prev = settings.contentHashes[normalizePath(file.path)];
+  if (prev) return { protected: false, dirty: false };
+  const current = await app.vault.read(file);
+  const { body: localBody } = splitFrontmatter(current);
+  if ((localBody || "").trim() !== (remoteBody || "").trim()) {
+    return { protected: true, dirty: false };
+  }
+  return { protected: false, dirty: false };
+}
+
+/** Remote is newer (or timestamps unknown) so a pull would have written. */
+function remoteWouldOverwrite(localSynced: string, remoteUpdated: string): boolean {
+  if (!localSynced || !remoteUpdated) return true;
+  return remoteUpdated > localSynced;
 }
 
 interface NoteIndex {
@@ -465,7 +509,6 @@ export async function pullWorld(
   cacheWorldCatalog(settings, worldSlug, pack);
   await saveSettings();
   const syncedAt = pack.pulled_at || new Date().toISOString();
-  const tagById = new Map(pack.tags.map((t) => [t.id, t.name]));
   const laneById = new Map(pack.lanes.map((l) => [l.id, l.name]));
   const eraById = new Map(pack.eras.map((e) => [e.id, e.name]));
   const articleTitleById = new Map(
@@ -534,11 +577,10 @@ export async function pullWorld(
         stats.skippedExisting += 1;
         continue;
       }
-      const tagNames = (article.tag_ids || []).map((id) => tagById.get(id) || id).filter(Boolean);
       const parentTitle = article.parent_article_id
         ? articleTitleById.get(article.parent_article_id) || ""
         : "";
-      const fm = wikiFrontmatterFromArticle(worldSlug, article, tagNames, syncedAt, {
+      const fm = wikiFrontmatterFromArticle(worldSlug, article, syncedAt, {
         parentTitle,
       });
       const content = buildNoteFile(fm as unknown as Record<string, unknown>, vaultBody);
@@ -564,15 +606,23 @@ export async function pullWorld(
 
     if (existing instanceof TFile) {
       if (mode === "full") {
-        const dirty = await fileIsDirty(app, existing, settings);
         const current = await app.vault.read(existing);
         const { data } = splitFrontmatter(current);
         const localSynced = String(data.backdrop_synced_at || "");
         const remoteUpdated = String(article.updated_at || "");
-        if (dirty) {
+        const { protected: protect } = await isProtectedFromOverwrite(
+          app,
+          existing,
+          settings,
+          vaultBody
+        );
+        if (protect) {
           stats.skippedDirty += 1;
-          stats.conflicts.push(path);
-          addConflictPath(settings, path);
+          // Only flag conflict when remote would have overwritten local work.
+          if (remoteWouldOverwrite(localSynced, remoteUpdated)) {
+            stats.conflicts.push(path);
+            addConflictPath(settings, path);
+          }
           continue;
         }
         if (localSynced && remoteUpdated && remoteUpdated <= localSynced) {
@@ -586,11 +636,10 @@ export async function pullWorld(
       continue;
     }
 
-    const tagNames = (article.tag_ids || []).map((id) => tagById.get(id) || id).filter(Boolean);
     const parentTitle = article.parent_article_id
       ? articleTitleById.get(article.parent_article_id) || ""
       : "";
-    const fm = wikiFrontmatterFromArticle(worldSlug, article, tagNames, syncedAt, {
+    const fm = wikiFrontmatterFromArticle(worldSlug, article, syncedAt, {
       parentTitle,
     });
     const content = buildNoteFile(fm as unknown as Record<string, unknown>, vaultBody);
@@ -664,15 +713,22 @@ export async function pullWorld(
 
     if (existing instanceof TFile) {
       if (mode === "full") {
-        const dirty = await fileIsDirty(app, existing, settings);
         const current = await app.vault.read(existing);
         const { data } = splitFrontmatter(current);
         const localSynced = String(data.backdrop_synced_at || "");
         const remoteUpdated = String(event.updated_at || "");
-        if (dirty) {
+        const { protected: protect } = await isProtectedFromOverwrite(
+          app,
+          existing,
+          settings,
+          vaultBody
+        );
+        if (protect) {
           stats.skippedDirty += 1;
-          stats.conflicts.push(path);
-          addConflictPath(settings, path);
+          if (remoteWouldOverwrite(localSynced, remoteUpdated)) {
+            stats.conflicts.push(path);
+            addConflictPath(settings, path);
+          }
           continue;
         }
         if (localSynced && remoteUpdated && remoteUpdated <= localSynced) {
@@ -710,6 +766,8 @@ export async function pullWorld(
         if (hash) {
           delete settings.contentHashes[forcePath];
           settings.contentHashes[expectedNorm] = hash;
+          clearConflictPath(settings, forcePath);
+          clearConflictPath(settings, expectedNorm);
           await saveSettings();
         }
       }
@@ -734,10 +792,10 @@ export async function pullAll(
   saveSettings: () => Promise<void>,
   options: PullOptions = { mode: "full" },
   slugIndex?: WikiSlugIndex
-): Promise<void> {
+): Promise<{ conflicts: string[] }> {
   if (options.mode === "force-current") {
     await pullCurrentNote(app, client, settings, saveSettings, options.currentPath, slugIndex);
-    return;
+    return { conflicts: [] };
   }
 
   let apiWorlds: Awaited<ReturnType<BackdropClient["worlds"]>>["worlds"] = [];
@@ -748,7 +806,7 @@ export async function pullAll(
       apiWorlds = (await client.worlds()).worlds || [];
     } catch (e) {
       noticeError(e, "List worlds");
-      return;
+      return { conflicts: [] };
     }
   }
 
@@ -759,7 +817,7 @@ export async function pullAll(
     } else {
       new Notice("BackDrop: no worlds available for this API key.");
     }
-    return;
+    return { conflicts: [] };
   }
 
   let created = 0;
@@ -810,6 +868,7 @@ export async function pullAll(
   }
   const wikiStatus = formatStatusCounts(articleStatusCounts);
   const timelineStatus = formatStatusCounts(eventStatusCounts);
+  const uniqueConflicts = [...new Set(conflicts.map((p) => normalizePath(p)))];
   if (options.mode === "startup") {
     new Notice(
       `BackDrop startup pull: ${created} created` +
@@ -817,18 +876,34 @@ export async function pullAll(
         (wikiStatus ? ` · wiki ${wikiStatus}` : "")
     );
   } else {
-    new Notice(
+    const conflictN = uniqueConflicts.length;
+    const notice = new Notice(
       `BackDrop pull: ${created} created, ${updated} updated` +
-        (dirty
-          ? `, ${dirty} skipped (local edits — conflict). Use Pull current / Resolve sync…`
+        (dirty ? `, ${dirty} skipped (local edits kept)` : "") +
+        (conflictN
+          ? ` · ${conflictN} conflict${conflictN === 1 ? "" : "s"} — open Review sync conflicts`
           : "") +
         (wikiStatus ? ` · wiki ${wikiStatus}` : "") +
-        (timelineStatus ? ` · timeline ${timelineStatus}` : "")
+        (timelineStatus ? ` · timeline ${timelineStatus}` : ""),
+      conflictN ? 12000 : 5000
     );
+    if (conflictN) {
+      const actions = notice.noticeEl.createDiv({ cls: "bd-notice-actions" });
+      const btn = actions.createEl("button", {
+        text: "Review conflicts",
+        cls: "mod-cta",
+      });
+      btn.addEventListener("click", (evt) => {
+        evt.preventDefault();
+        notice.hide();
+        options.onReviewConflicts?.(uniqueConflicts);
+      });
+    }
   }
-  if (conflicts.length) {
-    console.warn("[backdrop-sync] dirty conflicts", conflicts);
+  if (uniqueConflicts.length) {
+    console.warn("[backdrop-sync] dirty conflicts", uniqueConflicts);
   }
+  return { conflicts: uniqueConflicts };
 }
 
 export async function pullCurrentNote(
@@ -976,7 +1051,7 @@ export async function publishFile(
       category_slug: String(data.category || "general"),
       body_markdown: bodyForApi,
       summary: data.summary != null ? String(data.summary) : "",
-      status: String(data.status || "draft"),
+      status: normalizePublishStatusForType("wiki", data.status),
       if_updated_at: ifUpdated,
       force: opts.force === true,
     };
@@ -999,7 +1074,7 @@ export async function publishFile(
       payload.tag_ids = tagIds;
     } else if (Array.isArray(data.tags) && data.tags.length) {
       new Notice(
-        "BackDrop: tags not sent (pull once to cache tag IDs). Other fields still publish."
+        "BackDrop: tags not sent (pull once to cache tag IDs). Other fields still sync."
       );
     }
 
@@ -1021,22 +1096,11 @@ export async function publishFile(
       }
     } catch (e) {
       if (e instanceof BackdropApiError && e.status === 409) {
-        throw new Error("Remote changed since last pull. Pull again or force publish.");
+        throw new Error("Remote changed since last pull. Pull again or force sync.");
       }
       throw e;
     }
     const syncedAt = new Date().toISOString();
-    const catalog = settings.worldCatalogs?.[worldSlug];
-    const tagById = new Map((catalog?.tags || []).map((t) => [t.id, t.name]));
-    const publishedTagIds = Array.isArray(article.tag_ids)
-      ? (article.tag_ids as string[])
-      : tagIds || [];
-    const publishedTags =
-      publishedTagIds.length && tagById.size
-        ? publishedTagIds.map((tid) => tagById.get(tid) || tid).filter(Boolean)
-        : Array.isArray(data.tags)
-          ? data.tags
-          : [];
     const publishedChars = Array.isArray(article.characters)
       ? (article.characters as Array<{ character_name?: string; muse_id?: string | null }>)
       : null;
@@ -1058,7 +1122,7 @@ export async function publishFile(
         if (e.world !== worldSlug || parentTitle) return;
         const f = app.vault.getAbstractFileByPath(e.path);
         if (!(f instanceof TFile)) return;
-        const id = app.metadataCache.getFileCache(f)?.frontmatter?.backdrop_id;
+        const id = frontmatterRecord(app.metadataCache.getFileCache(f))?.backdrop_id;
         if (id != null && String(id) === String(parentId)) parentTitle = e.title;
       });
     }
@@ -1070,8 +1134,7 @@ export async function publishFile(
       backdrop_slug: article.slug,
       title: article.title,
       category: article.category_slug || data.category,
-      status: article.status,
-      tags: publishedTags,
+      status: normalizePublishStatusForType("wiki", article.status ?? data.status),
       backdrop_source: article.source || String(data.backdrop_source || "manual"),
       discord_sync_enabled:
         article.source === "pin"
@@ -1095,6 +1158,8 @@ export async function publishFile(
       backdrop_updated_at: article.updated_at || syncedAt,
       backdrop_synced_at: syncedAt,
     };
+    // Preserve non-empty user tags if present; never inject empty `tags: []`.
+    if (!Array.isArray(fm.tags) || fm.tags.length === 0) delete fm.tags;
     if (museIds && museIds.some((m) => m)) fm.character_muse_ids = museIds;
     if (parentTitle) fm.parent = parentTitle;
     // Keep Obsidian title-form links in the vault (do not write API slug body back).
@@ -1112,14 +1177,16 @@ export async function publishFile(
         title: String(article.title || file.basename),
       });
     }
-    new Notice(`Published wiki: ${String(article.title)}`);
+    new Notice(
+      `Synced wiki (${normalizePublishStatusForType("wiki", article.status ?? data.status)}): ${String(article.title)}`
+    );
     return;
   }
 
   const payload: Record<string, unknown> = {
     title: String(data.title || file.basename),
     body_markdown: bodyForApi,
-    status: String(data.status || "draft"),
+    status: normalizePublishStatusForType("timeline", data.status),
     event_kind: String(data.event_kind || "scene"),
     calendar_date: data.calendar_date ?? null,
     end_calendar_date: data.end_calendar_date ?? null,
@@ -1143,7 +1210,7 @@ export async function publishFile(
     }
   } catch (e) {
     if (e instanceof BackdropApiError && e.status === 409) {
-      throw new Error("Remote changed since last pull. Pull again or force publish.");
+      throw new Error("Remote changed since last pull. Pull again or force sync.");
     }
     throw e;
   }
@@ -1154,7 +1221,7 @@ export async function publishFile(
     backdrop_id: event.id,
     backdrop_world: worldSlug,
     title: event.title,
-    status: event.status,
+    status: normalizePublishStatusForType("timeline", event.status ?? data.status),
     event_kind: event.event_kind,
     calendar_date: event.calendar_date,
     end_calendar_date: event.end_calendar_date,
@@ -1167,7 +1234,28 @@ export async function publishFile(
   settings.contentHashes[normalizePath(file.path)] = hashContent(next);
   clearConflictPath(settings, file.path);
   await saveSettings();
-  new Notice(`Published timeline: ${String(event.title)}`);
+  new Notice(
+    `Synced timeline (${normalizePublishStatusForType("timeline", event.status ?? data.status)}): ${String(event.title)}`
+  );
+}
+
+/** Notes that bulk sync would push (dirty or never synced). */
+export async function countPendingPublish(
+  app: App,
+  settings: BackdropSettings
+): Promise<number> {
+  const root = settings.vaultRoot.replace(/\/+$/, "");
+  const files = app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(`${root}/`));
+  let pending = 0;
+  for (const file of files) {
+    const content = await app.vault.read(file);
+    const { data } = splitFrontmatter(content);
+    if (data.backdrop_type !== "wiki" && data.backdrop_type !== "timeline") continue;
+    const dirty = await fileIsDirty(app, file, settings);
+    if (!dirty && data.backdrop_id) continue;
+    pending += 1;
+  }
+  return pending;
 }
 
 export async function publishPending(
@@ -1198,16 +1286,16 @@ export async function publishPending(
     } catch (e) {
       if (e instanceof BackdropApiError && e.status === 429) {
         rateLimited = true;
-        noticeError(e, `Publish ${file.path}`);
-        // Stop bulk publish on rate limit so remaining notes aren't rejected in a storm.
+        noticeError(e, `Sync ${file.path}`);
+        // Stop bulk sync on rate limit so remaining notes aren't rejected in a storm.
         break;
       }
-      noticeError(e, `Publish ${file.path}`);
+      noticeError(e, `Sync ${file.path}`);
       await sleepMs(PUBLISH_GAP_MS);
     }
   }
   new Notice(
-    `BackDrop publish: ${published} published, ${skipped} unchanged` +
+    `BackDrop sync: ${published} pushed, ${skipped} unchanged` +
       (rateLimited ? " (stopped early — rate limited)" : "")
   );
 }

@@ -17,15 +17,13 @@ export class BackdropSettingTab extends PluginSettingTab {
   }
 
   /**
-   * TODO(obsidian 1.13+): adopt `getSettingDefinitions()` for the static
-   * fields (API URL / key / vault / pull-on-startup). The worlds checklist is
-   * async + custom-rendered, so keep imperative `display()` until that can be
-   * expressed as a definition list / render callback without a large rewrite.
+   * Worlds checklist stays imperative (async load + custom rows).
+   * Declarative `getSettingDefinitions()` needs Obsidian 1.13+ and would
+   * bypass `display()` when non-empty — defer until minAppVersion can rise.
    */
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    new Setting(containerEl).setName("BackDrop").setHeading();
 
     new Setting(containerEl)
       .setName("API base URL")
@@ -156,11 +154,11 @@ export class BackdropSettingTab extends PluginSettingTab {
     this.checklistState[world.slug] = state;
 
     const row = parent.createDiv({ cls: "bd-world-row" });
-    row.createEl("div", {
-      text: `${world.name}`,
+    row.createDiv({
+      text: world.name,
       cls: "bd-world-row__title",
     });
-    row.createEl("div", {
+    row.createDiv({
       text: world.slug,
       cls: "bd-world-row__slug setting-item-description",
     });

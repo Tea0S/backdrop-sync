@@ -1,5 +1,5 @@
 import { App, normalizePath } from "obsidian";
-import { safePathSegment, splitFrontmatter, wikiNotePath } from "./frontmatter";
+import { frontmatterRecord, safePathSegment, splitFrontmatter, wikiNotePath } from "./frontmatter";
 import type { PullPack } from "./types";
 
 /** Matches BackDrop wiki slug links: [[slug]], [[slug|label]], [[slug#heading]], [[slug#heading|label]]. */
@@ -159,9 +159,8 @@ export async function scanWikiSlugIndex(app: App, vaultRoot: string): Promise<Wi
 
   for (const file of app.vault.getMarkdownFiles()) {
     if (!file.path.startsWith(prefix) && file.path !== root) continue;
-    const cache = app.metadataCache.getFileCache(file);
-    const fm = cache?.frontmatter;
-    let type = fm?.backdrop_type;
+    const fm = frontmatterRecord(app.metadataCache.getFileCache(file));
+    let type: unknown = fm?.backdrop_type;
     let world = fm?.backdrop_world != null ? String(fm.backdrop_world) : "";
     let slug = fm?.backdrop_slug != null ? String(fm.backdrop_slug) : "";
     let title = fm?.title != null ? String(fm.title) : "";

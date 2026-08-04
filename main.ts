@@ -14,10 +14,18 @@ import { BackdropClient, noticeError } from "./src/api";
 import { DEFAULT_SETTINGS, type BackdropSettings } from "./src/types";
 import { BackdropSettingTab } from "./src/settings";
 import {
+  buildNoteFile,
+  frontmatterRecord,
+  hashContent,
+  parseWorldSlugs,
+  slugify,
+  splitFrontmatter,
+} from "./src/frontmatter";
+import {
   createTimelineStub,
   createWikiStub,
+  countPendingPublish,
   getSyncBadgeState,
-  publishFile,
   publishPending,
   pullAll,
   pullCurrentNote,
@@ -31,20 +39,16 @@ import {
 } from "./src/markdown";
 import {
   ArticlePropertiesModal,
+  BulkSyncConfirmModal,
+  ConflictListModal,
   InsertAudioModal,
   InsertImageModal,
   ResolveSyncModal,
+  SyncConfirmModal,
   WikilinkSuggestModal,
   applyEditorFormat,
   resolveWorldSlug,
 } from "./src/editorUi";
-import {
-  buildNoteFile,
-  hashContent,
-  parseWorldSlugs,
-  slugify,
-  splitFrontmatter,
-} from "./src/frontmatter";
 import { migrateSyncWorldsFromSlugs } from "./src/syncSelection";
 import { WikiSlugIndex, scanWikiSlugIndex } from "./src/wikiLinks";
 
@@ -81,6 +85,18 @@ export default class BackdropPlugin extends Plugin {
     this.statusBarEl.addClass("bd-statusbar--hidden");
     this.statusBarEl.setText("BackDrop");
     this.statusBarEl.addEventListener("click", () => {
+      const conflicts = this.settings.conflictPaths || [];
+      if (conflicts.length > 1) {
+        this.openConflictList(conflicts);
+        return;
+      }
+      if (conflicts.length === 1) {
+        const only = this.app.vault.getAbstractFileByPath(conflicts[0]);
+        if (only instanceof TFile) {
+          this.openResolveSync(only);
+          return;
+        }
+      }
       this.openResolveSync();
     });
     this.statusBarEl.addEventListener("contextmenu", (evt) => {
@@ -88,10 +104,10 @@ export default class BackdropPlugin extends Plugin {
       this.showInsertMenu(evt);
     });
 
-    this.addRibbonIcon("download", "Pull from BackDrop", () => {
+    this.addRibbonIcon("download", "Pull updates", () => {
       void this.runPull();
     });
-    this.addRibbonIcon("upload", "Publish current note to BackDrop", () => {
+    this.addRibbonIcon("upload", "Sync to BackDrop", () => {
       void this.runPublishCurrent();
     });
 
@@ -152,7 +168,7 @@ export default class BackdropPlugin extends Plugin {
 
     this.addCommand({
       id: "backdrop-pull",
-      name: "Pull from BackDrop",
+      name: "Pull updates",
       callback: async () => {
         await this.runPull();
       },
@@ -160,7 +176,7 @@ export default class BackdropPlugin extends Plugin {
 
     this.addCommand({
       id: "backdrop-pull-current",
-      name: "Pull current note from BackDrop",
+      name: "Pull current note",
       editorCheckCallback: (checking, _editor, view) => {
         const file = view?.file;
         if (!file || !this.isBackdropNoteSync(file)) return false;
@@ -172,7 +188,7 @@ export default class BackdropPlugin extends Plugin {
 
     this.addCommand({
       id: "backdrop-publish-current",
-      name: "Publish current note",
+      name: "Sync current note",
       editorCheckCallback: (checking, _editor, view) => {
         const file = view?.file;
         if (!file) return false;
@@ -184,34 +200,40 @@ export default class BackdropPlugin extends Plugin {
 
     this.addCommand({
       id: "backdrop-publish-current-force",
-      name: "Force publish current note",
+      name: "Force sync current note",
       editorCheckCallback: (checking, _editor, view) => {
         const file = view?.file;
         if (!file) return false;
         if (checking) return true;
-        void publishFile(this.app, this.client, file, this.settings, () => this.saveSettings(), {
-          force: true,
-          slugIndex: this.slugIndex,
-        })
-          .then(() => this.refreshSyncBadge())
-          .catch(noticeError);
+        void this.runPublishCurrent(file, { force: true });
         return true;
       },
     });
 
     this.addCommand({
       id: "backdrop-publish-pending",
-      name: "Publish all pending",
+      name: "Sync all pending",
       callback: async () => {
         try {
-          await publishPending(
-            this.app,
-            this.client,
-            this.settings,
-            () => this.saveSettings(),
-            this.slugIndex
-          );
-          void this.refreshSyncBadge();
+          const pending = await countPendingPublish(this.app, this.settings);
+          if (pending === 0) {
+            new Notice("BackDrop: nothing pending to sync.");
+            return;
+          }
+          new BulkSyncConfirmModal(this.app, pending, async () => {
+            try {
+              await publishPending(
+                this.app,
+                this.client,
+                this.settings,
+                () => this.saveSettings(),
+                this.slugIndex
+              );
+              void this.refreshSyncBadge();
+            } catch (e) {
+              noticeError(e);
+            }
+          }).open();
         } catch (e) {
           noticeError(e);
         }
@@ -330,7 +352,7 @@ export default class BackdropPlugin extends Plugin {
       editorCheckCallback: (checking, _editor, view) => {
         const file = view?.file;
         if (!file || !this.isBackdropNoteSync(file)) return false;
-        const type = this.app.metadataCache.getFileCache(file)?.frontmatter?.backdrop_type;
+        const type = frontmatterRecord(this.app.metadataCache.getFileCache(file))?.backdrop_type;
         if (type !== "wiki" && type !== "timeline") return false;
         if (checking) return true;
         this.openArticleProperties(file);
@@ -347,6 +369,14 @@ export default class BackdropPlugin extends Plugin {
         if (checking) return true;
         this.openResolveSync(file);
         return true;
+      },
+    });
+
+    this.addCommand({
+      id: "backdrop-review-conflicts",
+      name: "Review sync conflicts",
+      callback: () => {
+        this.openConflictList();
       },
     });
 
@@ -374,7 +404,12 @@ export default class BackdropPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const raw: unknown = await this.loadData();
+    const saved =
+      raw && typeof raw === "object" && !Array.isArray(raw)
+        ? (raw as Partial<BackdropSettings>)
+        : {};
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
     if (!this.settings.contentHashes) this.settings.contentHashes = {};
     if (!this.settings.worldCatalogs) this.settings.worldCatalogs = {};
     if (!Array.isArray(this.settings.conflictPaths)) this.settings.conflictPaths = [];
@@ -416,8 +451,7 @@ export default class BackdropPlugin extends Plugin {
   /** Prefer frontmatter `backdrop_type`; fall back to vault-root path. */
   isBackdropNoteSync(file: TFile | null | undefined): boolean {
     if (!file || file.extension !== "md") return false;
-    const cache = this.app.metadataCache.getFileCache(file);
-    const type = cache?.frontmatter?.backdrop_type;
+    const type = frontmatterRecord(this.app.metadataCache.getFileCache(file))?.backdrop_type;
     if (type === "wiki" || type === "timeline") return true;
     const root = this.settings.vaultRoot.replace(/\/+$/, "");
     if (!root) return false;
@@ -603,6 +637,21 @@ export default class BackdropPlugin extends Plugin {
     ).open();
   }
 
+  openConflictList(paths?: string[]) {
+    const list = paths?.length ? paths : this.settings.conflictPaths || [];
+    if (!list.length) {
+      new Notice("BackDrop: no sync conflicts.");
+      return;
+    }
+    new ConflictListModal(
+      this.app,
+      this.settings,
+      () => this.saveSettings(),
+      (file) => this.openResolveSync(file),
+      list
+    ).open();
+  }
+
   /** Status-bar right-click still offers insert shortcuts. */
   showInsertMenu(evt: MouseEvent) {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -635,7 +684,12 @@ export default class BackdropPlugin extends Plugin {
       })
     );
     menu.addItem((item) =>
-      item.setTitle("Publish this note").setIcon("upload").onClick(() => {
+      item.setTitle("Review sync conflicts").setIcon("alert-triangle").onClick(() => {
+        this.openConflictList();
+      })
+    );
+    menu.addItem((item) =>
+      item.setTitle("Sync to BackDrop…").setIcon("upload").onClick(() => {
         if (view.file) void this.runPublishCurrent(view.file);
       })
     );
@@ -684,15 +738,21 @@ export default class BackdropPlugin extends Plugin {
 
   async runPull() {
     try {
-      await pullAll(
+      const { conflicts } = await pullAll(
         this.app,
         this.client,
         this.settings,
         () => this.saveSettings(),
-        { mode: "full" },
+        {
+          mode: "full",
+          onReviewConflicts: (paths) => this.openConflictList(paths),
+        },
         this.slugIndex
       );
       void this.refreshSyncBadge();
+      if (conflicts.length) {
+        this.openConflictList(conflicts);
+      }
     } catch (e) {
       noticeError(e);
     }
@@ -719,20 +779,26 @@ export default class BackdropPlugin extends Plugin {
     }
   }
 
-  async runPublishCurrent(file?: TFile | null) {
+  async runPublishCurrent(file?: TFile | null, opts: { force?: boolean } = {}) {
     const target = file || this.app.workspace.getActiveFile();
     if (!(target instanceof TFile) || target.extension !== "md") {
-      new Notice("BackDrop: open a markdown note to publish.");
+      new Notice("BackDrop: open a markdown note to sync.");
       return;
     }
-    try {
-      await publishFile(this.app, this.client, target, this.settings, () => this.saveSettings(), {
-        slugIndex: this.slugIndex,
-      });
-      void this.refreshSyncBadge();
-    } catch (e) {
-      noticeError(e);
-    }
+    new SyncConfirmModal(
+      this.app,
+      target,
+      this.settings,
+      () => this.saveSettings(),
+      this.client,
+      this.slugIndex,
+      {
+        force: opts.force === true,
+        onDone: () => {
+          void this.refreshSyncBadge();
+        },
+      }
+    ).open();
   }
 
   /**

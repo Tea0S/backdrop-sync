@@ -996,7 +996,7 @@ function enhanceVideoLinks(root: HTMLElement) {
 
     const figure = createEl("figure", { cls: "bd-lore-figure bd-lore-video" });
     const frame = figure.createDiv({ cls: "bd-lore-video-frame" });
-    const iframe = frame.createEl("iframe", {
+    frame.createEl("iframe", {
       attr: {
         src,
         title: (a.textContent || "").trim() || "Embedded video",

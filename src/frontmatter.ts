@@ -1,4 +1,17 @@
+import type { CachedMetadata } from "obsidian";
 import type { PullPack, WikiFrontmatter, TimelineFrontmatter } from "./types";
+
+/**
+ * Obsidian types frontmatter values as `any`. Narrow to a record so callers
+ * can read fields as `unknown` without unsafe-assignment lint.
+ */
+export function frontmatterRecord(
+  cache: CachedMetadata | null | undefined
+): Record<string, unknown> | undefined {
+  const fm: unknown = cache?.frontmatter;
+  if (!fm || typeof fm !== "object" || Array.isArray(fm)) return undefined;
+  return fm as Record<string, unknown>;
+}
 
 export function parseWorldSlugs(raw: string): string[] {
   return String(raw || "")
@@ -56,6 +69,8 @@ export function stringifyFrontmatter(data: Record<string, unknown>): string {
   const lines = ["---"];
   for (const [key, value] of Object.entries(data)) {
     if (value === undefined) continue;
+    // Drop empty tags so we never write `tags: []` (pull omits the key entirely).
+    if (key === "tags" && Array.isArray(value) && value.length === 0) continue;
     lines.push(`${key}: ${yamlValue(value)}`);
   }
   lines.push("---", "");
@@ -143,7 +158,6 @@ export function hashContent(content: string): string {
 export function wikiFrontmatterFromArticle(
   worldSlug: string,
   article: PullPack["articles"][0],
-  tagNames: string[],
   syncedAt: string,
   opts?: { parentTitle?: string }
 ): WikiFrontmatter {
@@ -164,7 +178,6 @@ export function wikiFrontmatterFromArticle(
     title: article.title,
     category: article.category_slug || "general",
     status: article.status || "draft",
-    tags: tagNames,
     summary: article.summary || "",
     thumbnail_url: article.thumbnail_url || "",
     characters,
