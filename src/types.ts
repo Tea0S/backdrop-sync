@@ -1,5 +1,7 @@
 export interface SyncWorldSelection {
   slug: string;
+  /** Display name from the API when known. */
+  name?: string;
   syncWiki: boolean;
   syncTimeline: boolean;
 }
@@ -13,6 +15,8 @@ export interface WorldCatalogMeta {
   pins?: Array<{ id: string; name: string }>;
   regions?: Array<{ id: string; name: string }>;
   pulledAt?: string;
+  /** World display name from the last pull pack. */
+  name?: string;
 }
 
 export interface BackdropSettings {
@@ -38,6 +42,8 @@ export interface BackdropSettings {
   worldCatalogs: Record<string, WorldCatalogMeta>;
   /** Vault paths skipped as dirty on pull (or remote-newer + dirty). */
   conflictPaths: string[];
+  /** Last world slug used for pull or new-note create (modal preselect). */
+  lastWorldSlug: string;
 }
 
 export const DEFAULT_SETTINGS: BackdropSettings = {
@@ -51,6 +57,7 @@ export const DEFAULT_SETTINGS: BackdropSettings = {
   contentHashes: {},
   worldCatalogs: {},
   conflictPaths: [],
+  lastWorldSlug: "",
 };
 
 export type SyncBadgeState = "clean" | "dirty" | "conflict" | "unpublished";

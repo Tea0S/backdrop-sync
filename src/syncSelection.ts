@@ -42,7 +42,8 @@ export function selectionForWorld(
   world: ObsidianWorldSummary
 ): { syncWiki: boolean; syncTimeline: boolean } {
   const entry = settings.syncWorlds.find((s) => s.slug === world.slug);
-  if (settings.syncWorldsConfigured) {
+  // Prefer stored syncWorlds whenever present (refresh merges discoveries here).
+  if (entry || settings.syncWorldsConfigured) {
     return {
       syncWiki: Boolean(entry?.syncWiki) && world.can_edit_wiki,
       syncTimeline: Boolean(entry?.syncTimeline) && world.can_edit_timeline,
@@ -115,15 +116,178 @@ export function applyWorldChecklist(
   state: Record<string, { syncWiki: boolean; syncTimeline: boolean }>
 ): void {
   settings.syncWorldsConfigured = true;
-  settings.syncWorlds = worlds
-    .map((w) => {
-      const row = state[w.slug] || { syncWiki: false, syncTimeline: false };
-      return {
-        slug: w.slug,
-        syncWiki: Boolean(row.syncWiki) && w.can_edit_wiki,
-        syncTimeline: Boolean(row.syncTimeline) && w.can_edit_timeline,
-      };
-    })
-    .filter((s) => s.syncWiki || s.syncTimeline);
+  // Keep disabled worlds so a later refresh does not treat them as "new" and re-enable them.
+  settings.syncWorlds = worlds.map((w) => {
+    const row = state[w.slug] || { syncWiki: false, syncTimeline: false };
+    return {
+      slug: w.slug,
+      name: w.name,
+      syncWiki: Boolean(row.syncWiki) && w.can_edit_wiki,
+      syncTimeline: Boolean(row.syncTimeline) && w.can_edit_timeline,
+    };
+  });
   settings.worldSlugs = deriveWorldSlugs(settings.syncWorlds);
+}
+
+/**
+ * Merge API worlds into syncWorlds (shared source for settings checklist + create modals).
+ * Newly discovered worlds get editable facets enabled; existing toggles are preserved.
+ * Returns true if settings were mutated.
+ */
+export function mergeDiscoveredWorlds(
+  settings: BackdropSettings,
+  worlds: ObsidianWorldSummary[]
+): boolean {
+  if (!Array.isArray(settings.syncWorlds)) {
+    settings.syncWorlds = [];
+  }
+
+  const bySlug = new Map((settings.syncWorlds || []).map((w) => [w.slug, { ...w }]));
+  let changed = false;
+
+  for (const w of worlds) {
+    const existing = bySlug.get(w.slug);
+    if (!existing) {
+      bySlug.set(w.slug, {
+        slug: w.slug,
+        name: w.name,
+        syncWiki: Boolean(w.can_edit_wiki),
+        syncTimeline: Boolean(w.can_edit_timeline),
+      });
+      changed = true;
+      continue;
+    }
+    if (w.name && existing.name !== w.name) {
+      existing.name = w.name;
+      bySlug.set(w.slug, existing);
+      changed = true;
+    }
+  }
+
+  const next = worlds.map((w) => bySlug.get(w.slug)!);
+  const prev = settings.syncWorlds || [];
+  if (
+    changed ||
+    prev.length !== next.length ||
+    next.some((w, i) => {
+      const p = prev[i];
+      return (
+        !p ||
+        p.slug !== w.slug ||
+        p.name !== w.name ||
+        p.syncWiki !== w.syncWiki ||
+        p.syncTimeline !== w.syncTimeline
+      );
+    })
+  ) {
+    settings.syncWorlds = next;
+    changed = true;
+  }
+
+  const derived = deriveWorldSlugs(settings.syncWorlds);
+  if (settings.worldSlugs !== derived) {
+    settings.worldSlugs = derived;
+    changed = true;
+  }
+  return changed;
+}
+
+export type SyncedWorldOption = {
+  slug: string;
+  name: string;
+  syncWiki: boolean;
+  syncTimeline: boolean;
+};
+
+function worldNameLookup(settings: BackdropSettings): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const [slug, cat] of Object.entries(settings.worldCatalogs || {})) {
+    const name = String(cat?.name || "").trim();
+    if (name) map.set(slug, name);
+  }
+  for (const w of settings.syncWorlds || []) {
+    const name = String(w.name || "").trim();
+    if (name) map.set(w.slug, name);
+  }
+  return map;
+}
+
+/**
+ * Worlds enabled for sync in settings (same source as the settings checklist /
+ * mergeDiscoveredWorlds). When nothing is stored yet, fall back to pulled catalog keys.
+ */
+export function listSyncedWorlds(
+  settings: BackdropSettings,
+  facet?: "wiki" | "timeline"
+): SyncedWorldOption[] {
+  const names = worldNameLookup(settings);
+  let rows: Array<{ slug: string; name?: string; syncWiki: boolean; syncTimeline: boolean }>;
+
+  const fromSyncWorlds = (settings.syncWorlds || []).filter((w) => w.syncWiki || w.syncTimeline);
+  if (settings.syncWorldsConfigured || fromSyncWorlds.length) {
+    // Prefer structured syncWorlds whenever refresh/checklist has populated it —
+    // including before the user locks an explicit pull list (configured flag).
+    rows = fromSyncWorlds;
+  } else {
+    const legacy = parseWorldSlugs(settings.worldSlugs);
+    if (legacy.length) {
+      rows = legacy.map((slug) => ({ slug, syncWiki: true, syncTimeline: true }));
+    } else {
+      rows = Object.keys(settings.worldCatalogs || {}).map((slug) => ({
+        slug,
+        syncWiki: true,
+        syncTimeline: true,
+      }));
+    }
+  }
+
+  const options: SyncedWorldOption[] = rows.map((w) => ({
+    slug: w.slug,
+    name: String(w.name || names.get(w.slug) || "").trim(),
+    syncWiki: w.syncWiki,
+    syncTimeline: w.syncTimeline,
+  }));
+
+  if (facet === "wiki") return options.filter((w) => w.syncWiki);
+  if (facet === "timeline") return options.filter((w) => w.syncTimeline);
+  return options;
+}
+
+export function syncedWorldLabel(slug: string, name?: string): string {
+  const n = String(name || "").trim();
+  if (n && n.toLowerCase() !== slug.toLowerCase()) return `${n} (${slug})`;
+  return slug;
+}
+
+export function mostRecentlyPulledWorldSlug(settings: BackdropSettings): string {
+  let bestSlug = "";
+  let bestAt = "";
+  for (const [slug, cat] of Object.entries(settings.worldCatalogs || {})) {
+    const at = String(cat?.pulledAt || "");
+    if (at && (!bestAt || at > bestAt)) {
+      bestAt = at;
+      bestSlug = slug;
+    }
+  }
+  return bestSlug;
+}
+
+export function pickDefaultSyncedWorld(
+  options: SyncedWorldOption[],
+  settings: BackdropSettings,
+  currentSlug = ""
+): string {
+  if (!options.length) return "";
+  if (options.length === 1) return options[0].slug;
+  const candidates = [
+    currentSlug,
+    settings.lastWorldSlug,
+    mostRecentlyPulledWorldSlug(settings),
+  ]
+    .map((s) => String(s || "").trim())
+    .filter(Boolean);
+  for (const slug of candidates) {
+    if (options.some((o) => o.slug === slug)) return slug;
+  }
+  return options[0].slug;
 }

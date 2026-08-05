@@ -78,8 +78,10 @@ export function cacheWorldCatalog(settings: BackdropSettings, worldSlug: string,
     pins: (pack.pins || []).map((p) => ({ id: p.id, name: p.name })),
     regions: (pack.regions || []).map((r) => ({ id: r.id, name: r.name })),
     pulledAt: pack.pulled_at,
+    name: pack.world?.name || undefined,
   };
   settings.worldCatalogs[worldSlug] = meta;
+  if (worldSlug) settings.lastWorldSlug = worldSlug;
 }
 
 /** Resolve pin/region ids from frontmatter (ids or catalog names). */
@@ -125,6 +127,54 @@ export function charactersPayloadFromFrontmatter(data: Record<string, unknown>):
     out.push(museId ? { characterName: name, museId } : { characterName: name });
   }
   return out;
+}
+
+/**
+ * Categories for a world: last-pull catalog (`worldCatalogs`) plus any
+ * `category` values on local wiki notes under that world's vault folder.
+ * Prefer catalog entries (name + slug); vault-only values use the raw slug/name.
+ */
+export function listWorldCategoryOptions(
+  app: App,
+  settings: BackdropSettings,
+  worldSlug: string
+): Array<{ slug: string; name: string }> {
+  const slug = String(worldSlug || "").trim();
+  if (!slug) return [];
+
+  const bySlug = new Map<string, { slug: string; name: string }>();
+  const catalog = settings.worldCatalogs?.[slug];
+  for (const c of catalog?.categories || []) {
+    const catSlug = String(c.slug || "").trim();
+    if (!catSlug) continue;
+    bySlug.set(catSlug, { slug: catSlug, name: String(c.name || catSlug).trim() || catSlug });
+  }
+
+  const root = settings.vaultRoot.replace(/\/+$/, "");
+  const prefix = `${root}/${slug}/wiki/`;
+  for (const file of app.vault.getMarkdownFiles()) {
+    if (!file.path.startsWith(prefix) && !file.path.startsWith(normalizePath(prefix))) continue;
+    const fm = frontmatterRecord(app.metadataCache.getFileCache(file));
+    if (!fm) continue;
+    if (String(fm.backdrop_type || "") !== "wiki") continue;
+    const noteWorld = String(fm.backdrop_world || "").trim();
+    if (noteWorld && noteWorld !== slug) continue;
+    const cat = String(fm.category || "").trim();
+    if (!cat || bySlug.has(cat)) continue;
+    bySlug.set(cat, { slug: cat, name: cat });
+  }
+
+  return Array.from(bySlug.values()).sort((a, b) =>
+    a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+  );
+}
+
+/** Prefer "general", else first known category, else empty (custom typing). */
+export function defaultCategorySlug(
+  options: Array<{ slug: string; name: string }>
+): string {
+  if (options.some((o) => o.slug === "general")) return "general";
+  return options[0]?.slug || "";
 }
 
 /** Merge a newly created category/tag into the local world catalog cache. */
@@ -1466,10 +1516,22 @@ export async function createWikiStub(
   settings: BackdropSettings,
   worldSlug: string,
   title: string,
-  category: string
+  category: string,
+  articleSlug?: string
 ): Promise<TFile> {
-  const slug = slugify(title);
-  const catFolder = safePathSegment(category || "general");
+  const rawSlug = String(articleSlug || "").trim();
+  const slug = rawSlug ? slugify(rawSlug) : slugify(title);
+  const rawCategory = String(category || "").trim();
+  const catalog = settings.worldCatalogs?.[worldSlug];
+  const known = (catalog?.categories || []).find(
+    (c) => c.slug === rawCategory || String(c.name || "").trim() === rawCategory
+  );
+  // Frontmatter stores category slug (matches pull / Article properties).
+  const categorySlug = known?.slug || (rawCategory ? slugify(rawCategory) : "") || "general";
+  // Folder uses display name when known (same as pull), else the typed value.
+  const catFolder = safePathSegment(
+    known?.name ? String(known.name).trim() : rawCategory || categorySlug || "general"
+  );
   const path = wikiNotePath(settings.vaultRoot, worldSlug, catFolder, title);
   const syncedAt = new Date().toISOString();
   const content = buildNoteFile(
@@ -1478,7 +1540,7 @@ export async function createWikiStub(
       backdrop_world: worldSlug,
       backdrop_slug: slug,
       title,
-      category: category || "general",
+      category: categorySlug,
       status: "draft",
       tags: [],
       summary: "",

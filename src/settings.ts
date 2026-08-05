@@ -1,13 +1,19 @@
 import {
   App,
+  ButtonComponent,
   PluginSettingTab,
   Setting,
+  ToggleComponent,
   type SettingDefinitionItem,
 } from "obsidian";
 import type BackdropPlugin from "../main";
 import { noticeError } from "./api";
 import type { ObsidianWorldSummary } from "./types";
-import { applyWorldChecklist, selectionForWorld } from "./syncSelection";
+import {
+  applyWorldChecklist,
+  mergeDiscoveredWorlds,
+  selectionForWorld,
+} from "./syncSelection";
 
 export class BackdropSettingTab extends PluginSettingTab {
   plugin: BackdropPlugin;
@@ -71,8 +77,8 @@ export class BackdropSettingTab extends PluginSettingTab {
           {
             name: "Select worlds",
             desc: this.plugin.settings.syncWorldsConfigured
-              ? "Pull only the worlds and facets enabled below."
-              : "Nothing customized yet — pull uses all editable worlds (wiki + timeline). Toggle any option to save an explicit list.",
+              ? "Pull and New wiki/timeline use the worlds and facets enabled below."
+              : "Refresh loads editable worlds (wiki + timeline on by default). Toggle any option to lock an explicit list for pull.",
             aliases: ["wiki", "timeline", "checklist", "worlds"],
             render: (setting) => {
               this.renderWorldsSection(setting);
@@ -102,7 +108,12 @@ export class BackdropSettingTab extends PluginSettingTab {
   }
 
   private renderWorldsSection(setting: Setting): void {
-    const host = setting.settingEl.createDiv({ cls: "bd-world-settings-host" });
+    // update() re-invokes custom render without clearing prior DOM — replace, don't append.
+    setting.setClass("bd-world-settings");
+    setting.controlEl.empty();
+    setting.settingEl.querySelectorAll(".bd-world-settings-host").forEach((el) => el.remove());
+
+    const host = setting.controlEl.createDiv({ cls: "bd-world-settings-host" });
 
     const hasKey = Boolean(this.plugin.settings.apiKey.trim());
     if (!hasKey) {
@@ -113,14 +124,13 @@ export class BackdropSettingTab extends PluginSettingTab {
       return;
     }
 
-    setting.addButton((btn) =>
-      btn
-        .setButtonText(this.worldsLoading ? "Loading…" : "Refresh")
-        .setDisabled(this.worldsLoading)
-        .onClick(() => {
-          void this.loadWorlds(true);
-        })
-    );
+    const toolbar = host.createDiv({ cls: "bd-world-settings-toolbar" });
+    new ButtonComponent(toolbar)
+      .setButtonText(this.worldsLoading ? "Loading…" : "Refresh")
+      .setDisabled(this.worldsLoading)
+      .onClick(() => {
+        void this.loadWorlds(true);
+      });
 
     if (this.worldsLoading && !this.worlds) {
       host.createEl("p", {
@@ -156,6 +166,11 @@ export class BackdropSettingTab extends PluginSettingTab {
     }
 
     const list = host.createDiv({ cls: "bd-world-checklist" });
+    const header = list.createDiv({ cls: "bd-world-checklist__header" });
+    header.createSpan({ text: "World", cls: "bd-world-checklist__col-world" });
+    header.createSpan({ text: "Wiki", cls: "bd-world-checklist__col-facet" });
+    header.createSpan({ text: "Timeline", cls: "bd-world-checklist__col-facet" });
+
     for (const world of this.worlds) {
       this.renderWorldRow(list, world);
     }
@@ -166,46 +181,56 @@ export class BackdropSettingTab extends PluginSettingTab {
     this.checklistState[world.slug] = state;
 
     const row = parent.createDiv({ cls: "bd-world-row" });
-    row.createDiv({
+    const info = row.createDiv({ cls: "bd-world-row__info" });
+    info.createDiv({
       text: world.name,
       cls: "bd-world-row__title",
     });
-    row.createDiv({
+    info.createDiv({
       text: world.slug,
-      cls: "bd-world-row__slug setting-item-description",
+      cls: "bd-world-row__slug",
     });
 
-    const toggles = row.createDiv({ cls: "bd-world-row__toggles" });
+    this.addFacetToggle(row, "Wiki", world.can_edit_wiki, state.syncWiki && world.can_edit_wiki, async (value) => {
+      this.checklistState[world.slug] = {
+        ...this.checklistState[world.slug],
+        syncWiki: value,
+      };
+      await this.persistChecklist();
+    });
 
-    new Setting(toggles)
-      .setName("Wiki")
-      .setDesc(world.can_edit_wiki ? "Pull wiki articles" : "No wiki edit access")
-      .addToggle((toggle) => {
-        toggle.setValue(state.syncWiki && world.can_edit_wiki);
-        toggle.setDisabled(!world.can_edit_wiki);
-        toggle.onChange(async (value) => {
-          this.checklistState[world.slug] = {
-            ...this.checklistState[world.slug],
-            syncWiki: value,
-          };
-          await this.persistChecklist();
-        });
-      });
+    this.addFacetToggle(
+      row,
+      "Timeline",
+      world.can_edit_timeline,
+      state.syncTimeline && world.can_edit_timeline,
+      async (value) => {
+        this.checklistState[world.slug] = {
+          ...this.checklistState[world.slug],
+          syncTimeline: value,
+        };
+        await this.persistChecklist();
+      }
+    );
+  }
 
-    new Setting(toggles)
-      .setName("Timeline")
-      .setDesc(world.can_edit_timeline ? "Pull timeline events" : "No timeline edit access")
-      .addToggle((toggle) => {
-        toggle.setValue(state.syncTimeline && world.can_edit_timeline);
-        toggle.setDisabled(!world.can_edit_timeline);
-        toggle.onChange(async (value) => {
-          this.checklistState[world.slug] = {
-            ...this.checklistState[world.slug],
-            syncTimeline: value,
-          };
-          await this.persistChecklist();
-        });
-      });
+  private addFacetToggle(
+    parent: HTMLElement,
+    label: string,
+    canEdit: boolean,
+    checked: boolean,
+    onChange: (value: boolean) => void | Promise<void>
+  ): void {
+    const cell = parent.createDiv({ cls: "bd-world-facet" });
+    cell.setAttr("aria-label", label);
+    if (!canEdit) cell.addClass("is-disabled");
+    const toggle = new ToggleComponent(cell);
+    toggle.setValue(checked);
+    toggle.setDisabled(!canEdit);
+    toggle.setTooltip(canEdit ? label : `No ${label.toLowerCase()} edit access`);
+    toggle.onChange((value) => {
+      void onChange(value);
+    });
   }
 
   private async persistChecklist(): Promise<void> {
@@ -226,6 +251,9 @@ export class BackdropSettingTab extends PluginSettingTab {
     try {
       const res = await this.plugin.client.worlds();
       this.worlds = res.worlds || [];
+      if (mergeDiscoveredWorlds(this.plugin.settings, this.worlds)) {
+        await this.plugin.saveSettings();
+      }
       this.checklistState = {};
       for (const world of this.worlds) {
         this.checklistState[world.slug] = selectionForWorld(this.plugin.settings, world);

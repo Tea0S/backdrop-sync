@@ -1,7 +1,7 @@
 {
   "id": "backdrop-sync",
   "name": "BackDrop",
-  "version": "0.1.14",
+  "version": "0.1.20",
   "minAppVersion": "1.13.0",
   "description": "Sync BackDrop wiki and timeline articles with your vault.",
   "author": "BackstagePass Group",

@@ -227,6 +227,7 @@ export function buildNoteFile(fm: Record<string, unknown>, body: string): string
   return stringifyFrontmatter(fm) + (body || "").replace(/^\n+/, "");
 }
 
+/** Match BackDrop web/API `slugifyArticleTitle` (kebab-case, max 62). */
 export function slugify(title: string): string {
   const base = String(title || "")
     .trim()
@@ -235,4 +236,17 @@ export function slugify(title: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 62);
   return base || "article";
+}
+
+/**
+ * Soft normalize while typing a slug (keeps a trailing hyphen so spaces feel responsive).
+ * Match BackDrop web `normalizeSlugInput`.
+ */
+export function normalizeSlugInput(value: string): string {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+/, "")
+    .slice(0, 63);
 }

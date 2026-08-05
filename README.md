@@ -14,7 +14,7 @@ Digital-garden style sync for BackDrop wiki and timeline articles.
 
 Open a note with `backdrop_type: wiki` or `timeline` in frontmatter. The markdown view header shows BackDrop actions: **Insert image**, **Insert audio**, spoiler wrap, **Insert wikilink**, **Article properties**, **Resolve sync…**, and **Pull this note**.
 
-A compact format strip (H2 / H3 / Bold / Italic / Link / Table) sits beside the header actions on BackDrop notes only.
+On BackDrop notes, a single **Format…** header action opens a menu for H2 / H3 / Bold / Italic / Link / Table (no wrapping strip in the title bar).
 
 The status bar shows sync state for the active note: **Clean** / **Dirty** / **Conflict** / **Unpublished**. Click the badge to open **Resolve sync…** (keep local, take remote, or open the Sync panel to force-push local). Right-click the badge for insert shortcuts.
 
