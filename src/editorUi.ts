@@ -10,20 +10,24 @@ import {
 } from "obsidian";
 import type { BackdropClient } from "./api";
 import { noticeError } from "./api";
-import { buildNoteFile, frontmatterRecord, hashContent, splitFrontmatter } from "./frontmatter";
+import { diffLines, summarizeDiff, type DiffLine } from "./diff";
+import { buildNoteFile, frontmatterRecord, splitFrontmatter } from "./frontmatter";
 import { alignedImageMarkdown, audioMarkdown } from "./markdown";
 import {
   clearConflictPath,
   getSyncBadgeState,
+  healSpuriousConflicts,
   listPublishCandidates,
   normalizePublishStatusForType,
   publishSelected,
   pullCurrentNote,
+  refreshWikiDiscordFromRemote,
   upsertCatalogCategory,
   type PublishCandidate,
   type SyncBadgeState,
 } from "./sync";
 import type { BackdropSettings, WorldCatalogMeta } from "./types";
+import { contentMatchesStoredHash, hashNoteForSync, notesSemanticallyEqual } from "./syncState";
 import type { WikiLinkEntry, WikiSlugIndex } from "./wikiLinks";
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "avif"]);
@@ -727,10 +731,10 @@ export class ArticlePropertiesModal extends Modal {
     }
     const next = buildNoteFile(fm, parsed.body);
     const prevHash = this.settings.contentHashes[normalizePath(this.file.path)];
-    const wasClean = prevHash && prevHash === hashContent(latest);
+    const wasClean = contentMatchesStoredHash(latest, prevHash);
     await this.app.vault.modify(this.file, next);
-    if (wasClean) {
-      this.settings.contentHashes[normalizePath(this.file.path)] = hashContent(next);
+    if (wasClean && notesSemanticallyEqual(latest, next)) {
+      this.settings.contentHashes[normalizePath(this.file.path)] = hashNoteForSync(next);
       await this.saveSettings();
     }
     new Notice("BackDrop: properties saved.");
@@ -831,6 +835,16 @@ export class ResolveSyncModal extends Modal {
   private remoteBody = "";
   private remoteLoading = false;
   private localStatus = "draft";
+  private localTitle = "";
+  private localCategory = "";
+  private localUpdated = "";
+  private remoteTitle = "";
+  private remoteStatus = "";
+  private remoteCategory = "";
+  private remoteUpdated = "";
+  private diffLines: DiffLine[] = [];
+  private showUnchanged = false;
+  private viewMode: "unified" | "side" = "unified";
 
   constructor(
     app: App,
@@ -845,10 +859,14 @@ export class ResolveSyncModal extends Modal {
   }
 
   async onOpen() {
+    this.modalEl.addClass("bd-resolve-modal");
     this.state = await getSyncBadgeState(this.app, this.file, this.settings);
     const content = await this.app.vault.read(this.file);
     const { body, data } = splitFrontmatter(content);
     this.localBody = body || "";
+    this.localTitle = String(data.title || this.file.basename);
+    this.localCategory = String(data.category || "");
+    this.localUpdated = String(data.backdrop_updated_at || "");
     this.localStatus = normalizePublishStatusForType(
       String(data.backdrop_type || ""),
       data.status
@@ -866,10 +884,18 @@ export class ResolveSyncModal extends Modal {
           const pack = await this.client.pull(world);
           if (type === "wiki") {
             const art = (pack.articles || []).find((a) => a.id === id);
-            this.remoteBody = art?.body_markdown || "(remote article not found)";
+            this.remoteBody = art?.body_markdown ?? "(remote article not found)";
+            this.remoteTitle = art ? String(art.title || "") : "";
+            this.remoteStatus = art ? String(art.status || "") : "";
+            this.remoteCategory = art ? String(art.category_slug || "") : "";
+            this.remoteUpdated = art ? String(art.updated_at || "") : "";
           } else {
             const ev = (pack.events || []).find((e) => e.id === id);
-            this.remoteBody = ev?.body_markdown || "(remote event not found)";
+            this.remoteBody = ev?.body_markdown ?? "(remote event not found)";
+            this.remoteTitle = ev ? String(ev.title || "") : "";
+            this.remoteStatus = ev ? String(ev.status || "") : "";
+            this.remoteCategory = "";
+            this.remoteUpdated = ev ? String(ev.updated_at || "") : "";
           }
         } else {
           this.remoteBody = "(missing backdrop_id / world — cannot fetch remote)";
@@ -877,8 +903,126 @@ export class ResolveSyncModal extends Modal {
       } catch (e) {
         this.remoteBody = `Failed to load remote: ${e instanceof Error ? e.message : String(e)}`;
       }
+      this.diffLines = diffLines(this.localBody, this.remoteBody);
       this.remoteLoading = false;
       this.render();
+    }
+  }
+
+  private renderDiff(container: HTMLElement) {
+    const summary = summarizeDiff(this.diffLines);
+    const toolbar = container.createDiv({ cls: "bd-diff-toolbar" });
+    toolbar.createSpan({
+      text: `${summary.removed} removed · ${summary.added} added · ${summary.unchanged} unchanged`,
+      cls: "bd-diff-summary",
+    });
+    new Setting(toolbar)
+      .setClass("bd-diff-toolbar-controls")
+      .addDropdown((dd) => {
+        dd.addOption("unified", "Unified")
+          .addOption("side", "Side by side")
+          .setValue(this.viewMode)
+          .onChange((v) => {
+            this.viewMode = v === "side" ? "side" : "unified";
+            this.render();
+          });
+      })
+      .addToggle((t) => {
+        t.setValue(this.showUnchanged)
+          .setTooltip("Show unchanged lines")
+          .onChange((on) => {
+            this.showUnchanged = on;
+            this.render();
+          });
+      });
+    toolbar.createSpan({
+      text: this.showUnchanged ? "Showing all lines" : "Changes only",
+      cls: "setting-item-description",
+    });
+
+    const visible = this.showUnchanged
+      ? this.diffLines
+      : this.diffLines.filter((l) => l.op !== "same");
+
+    if (!visible.length) {
+      container.createEl("p", {
+        text: "Bodies match. Differences may be in frontmatter (title, status, category).",
+        cls: "setting-item-description",
+      });
+      return;
+    }
+
+    if (this.viewMode === "side") {
+      this.renderSideDiff(container, visible);
+    } else {
+      this.renderUnifiedDiff(container, visible);
+    }
+  }
+
+  private renderUnifiedDiff(container: HTMLElement, lines: DiffLine[]) {
+    const pre = container.createDiv({ cls: "bd-diff-unified" });
+    for (const line of lines) {
+      const row = pre.createDiv({
+        cls: `bd-diff-line bd-diff-line--${line.op}`,
+      });
+      const gutter = row.createSpan({ cls: "bd-diff-gutter" });
+      if (line.op === "add") gutter.setText(`+${line.rightNo ?? ""}`);
+      else if (line.op === "del") gutter.setText(`−${line.leftNo ?? ""}`);
+      else gutter.setText(String(line.leftNo ?? ""));
+      row.createSpan({
+        text: line.op === "add" ? "+" : line.op === "del" ? "−" : " ",
+        cls: "bd-diff-marker",
+      });
+      row.createSpan({ text: line.text || " ", cls: "bd-diff-text" });
+    }
+  }
+
+  private renderSideDiff(container: HTMLElement, lines: DiffLine[]) {
+    const grid = container.createDiv({ cls: "bd-diff-side" });
+    const left = grid.createDiv({ cls: "bd-diff-side-col" });
+    const right = grid.createDiv({ cls: "bd-diff-side-col" });
+    left.createDiv({ text: "Local", cls: "bd-diff-side-label" });
+    right.createDiv({ text: "Remote", cls: "bd-diff-side-label" });
+    for (const line of lines) {
+      if (line.op === "same") {
+        left.createDiv({
+          text: line.text || " ",
+          cls: "bd-diff-line bd-diff-line--same",
+        });
+        right.createDiv({
+          text: line.text || " ",
+          cls: "bd-diff-line bd-diff-line--same",
+        });
+      } else if (line.op === "del") {
+        left.createDiv({
+          text: line.text || " ",
+          cls: "bd-diff-line bd-diff-line--del",
+        });
+        right.createDiv({ text: " ", cls: "bd-diff-line bd-diff-line--empty" });
+      } else {
+        left.createDiv({ text: " ", cls: "bd-diff-line bd-diff-line--empty" });
+        right.createDiv({
+          text: line.text || " ",
+          cls: "bd-diff-line bd-diff-line--add",
+        });
+      }
+    }
+  }
+
+  private renderMeta(container: HTMLElement) {
+    const table = container.createDiv({ cls: "bd-conflict-meta" });
+    const rows: Array<[string, string, string]> = [
+      ["Title", this.localTitle, this.remoteTitle || "—"],
+      ["Status", this.localStatus, this.remoteStatus || "—"],
+      ["Category", this.localCategory || "—", this.remoteCategory || "—"],
+      ["Updated", this.localUpdated || "—", this.remoteUpdated || "—"],
+    ];
+    for (const [label, local, remote] of rows) {
+      const row = table.createDiv({ cls: "bd-conflict-meta-row" });
+      if (local !== remote) row.addClass("bd-conflict-meta-row--diff");
+      row.createSpan({ text: label, cls: "bd-conflict-meta-label" });
+      row.createSpan({ text: local, cls: "bd-conflict-meta-local" });
+      row.createSpan({ text: remote, cls: "bd-conflict-meta-remote" });
     }
   }
 
@@ -887,7 +1031,7 @@ export class ResolveSyncModal extends Modal {
     contentEl.empty();
     contentEl.createEl("h2", { text: "Resolve sync" });
     contentEl.createEl("p", {
-      text: `Status: ${this.state} · local visibility: ${this.localStatus} · ${this.file.path}`,
+      text: `${this.state === "conflict" ? "Conflict" : this.state} · ${this.file.path}`,
       cls: "setting-item-description",
     });
 
@@ -895,28 +1039,29 @@ export class ResolveSyncModal extends Modal {
       contentEl.createEl("p", {
         text:
           this.state === "conflict"
-            ? "Remote changed while you have local edits. Keep local, take remote, or open Sync to push local (force)."
-            : "Local edits not yet pushed. Keep working, take remote (overwrite), or open Sync to push local (force).",
+            ? "Remote changed while you have local edits. Review the diff, then keep local, take remote, or push local."
+            : "Local edits not yet pushed. Review against remote, then keep working, take remote, or push local.",
         cls: "setting-item-description",
       });
 
-      const compare = contentEl.createDiv({ cls: "bd-conflict-compare" });
-      const localCol = compare.createDiv({ cls: "bd-conflict-pane" });
-      localCol.createEl("h3", { text: "Local" });
-      const localTa = localCol.createEl("textarea", { cls: "bd-conflict-textarea" });
-      localTa.value = this.localBody.slice(0, 12000);
-      localTa.readOnly = true;
-      localTa.rows = 14;
+      if (!this.remoteLoading) this.renderMeta(contentEl);
 
-      const remoteCol = compare.createDiv({ cls: "bd-conflict-pane" });
-      remoteCol.createEl("h3", { text: "Remote" });
-      const remoteTa = remoteCol.createEl("textarea", { cls: "bd-conflict-textarea" });
-      remoteTa.value = this.remoteLoading ? "Loading remote…" : this.remoteBody.slice(0, 12000);
-      remoteTa.readOnly = true;
-      remoteTa.rows = 14;
+      const compare = contentEl.createDiv({ cls: "bd-conflict-compare" });
+      if (this.remoteLoading) {
+        compare.createEl("p", { text: "Loading remote…", cls: "setting-item-description" });
+      } else {
+        this.renderDiff(compare);
+      }
+    } else {
+      contentEl.createEl("p", {
+        text: "This note is clean — no pending local/remote conflict.",
+        cls: "setting-item-description",
+      });
     }
 
-    new Setting(contentEl)
+    const actions = contentEl.createDiv({ cls: "bd-resolve-actions" });
+
+    new Setting(actions)
       .setName("Keep local")
       .setDesc("Clear the conflict flag. Local content stays; sync when ready.")
       .addButton((btn) =>
@@ -929,9 +1074,9 @@ export class ResolveSyncModal extends Modal {
         })
       );
 
-    new Setting(contentEl)
+    new Setting(actions)
       .setName("Take remote")
-      .setDesc("Force-pull this note from BackDrop (overwrites local edits).")
+      .setDesc("Overwrite this note with the BackDrop version.")
       .addButton((btn) =>
         btn.setButtonText("Take remote").setDestructive().onClick(async () => {
           this.close();
@@ -944,6 +1089,7 @@ export class ResolveSyncModal extends Modal {
               this.file.path,
               this.slugIndex
             );
+            new Notice("BackDrop: took remote version.");
           } catch (e) {
             noticeError(e);
           }
@@ -951,11 +1097,11 @@ export class ResolveSyncModal extends Modal {
         })
       );
 
-    new Setting(contentEl)
-      .setName("Sync local (force)")
-      .setDesc("Open the Sync panel to overwrite remote with this note.")
+    new Setting(actions)
+      .setName("Push local")
+      .setDesc("Open Sync panel and overwrite remote with this note.")
       .addButton((btn) =>
-        btn.setButtonText("Sync local…").setCta().onClick(() => {
+        btn.setButtonText("Push local…").setCta().onClick(() => {
           this.close();
           new SyncPanelModal(
             this.app,
@@ -990,6 +1136,7 @@ export class SyncPanelModal extends Modal {
   private loading = true;
   private busy = false;
   private focusPath = "";
+  private scopePath = "";
   private statusEl: HTMLElement | null = null;
 
   constructor(
@@ -1002,19 +1149,38 @@ export class SyncPanelModal extends Modal {
       force?: boolean;
       /** Pre-check and scroll to this note (included even if clean). */
       focusFile?: TFile | null;
+      /** Limit candidates to this folder (world / category / wiki / timeline). */
+      underPath?: string;
+      /** Optional short label for the scope in the empty-state copy. */
+      scopeLabel?: string;
       onDone?: () => void;
     } = {}
   ) {
     super(app);
     this.focusPath = opts.focusFile ? normalizePath(opts.focusFile.path) : "";
+    this.scopePath = opts.underPath ? normalizePath(opts.underPath).replace(/\/+$/, "") : "";
   }
 
   async onOpen() {
     this.modalEl.addClass("bd-sync-panel-modal");
     this.render();
     try {
+      const healed = await healSpuriousConflicts(this.app, this.settings);
+      if (healed) await this.saveSettings();
+      // BackDrop owns Discord flags; fill local FM when pull skipped dirty/existing notes.
+      await refreshWikiDiscordFromRemote(
+        this.app,
+        this.client,
+        this.settings,
+        this.saveSettings,
+        {
+          underPath: this.scopePath || undefined,
+          includePath: this.focusPath || undefined,
+        }
+      );
       const candidates = await listPublishCandidates(this.app, this.settings, {
         includePath: this.focusPath || undefined,
+        underPath: this.scopePath || undefined,
       });
       this.rows = candidates.map((c) => ({
         candidate: c,
@@ -1045,15 +1211,24 @@ export class SyncPanelModal extends Modal {
     contentEl.addClass("bd-sync-panel");
 
     contentEl.createEl("h2", { text: "Sync to BackDrop" });
+    const scopeHint = this.opts.scopeLabel
+      ? ` Scoped to ${this.opts.scopeLabel}.`
+      : this.scopePath
+        ? ` Scoped to ${this.scopePath}.`
+        : "";
     contentEl.createEl("p", {
-      text: this.opts.force
-        ? "Force-push selected notes (overwrite remote). Status controls visibility — Sync does not mean Published."
-        : "Choose notes to push. Status controls visibility — Sync does not mean Published.",
+      text: (this.opts.force
+        ? "Force-push selected notes (overwrite remote). Status is visibility only."
+        : "Local edits are ready to push — check what you want, then Push selected. Status is visibility only.") +
+        scopeHint,
       cls: "setting-item-description",
     });
 
     if (this.loading) {
-      contentEl.createEl("p", { text: "Scanning vault…", cls: "setting-item-description" });
+      contentEl.createEl("p", {
+        text: "Refreshing Discord flags from BackDrop…",
+        cls: "setting-item-description",
+      });
       return;
     }
 
@@ -1063,7 +1238,9 @@ export class SyncPanelModal extends Modal {
         cls: "bd-sync-panel-empty",
       });
       contentEl.createEl("p", {
-        text: "No dirty, unpublished, or conflict notes under the vault root.",
+        text: this.scopePath
+          ? `No dirty, unpublished, or conflict notes under ${this.opts.scopeLabel || this.scopePath}.`
+          : "No dirty, unpublished, or conflict notes under the vault root.",
         cls: "setting-item-description",
       });
       new Setting(contentEl).addButton((btn) =>
@@ -1121,11 +1298,21 @@ export class SyncPanelModal extends Modal {
             : c.hint === "Dirty"
               ? "bd-sync-hint--dirty"
               : "bd-sync-hint--clean";
-      hints.createSpan({ text: c.hint, cls: `bd-sync-hint ${hintCls}` });
-      if (c.localDiffers) {
-        hints.createSpan({ text: "Local differs", cls: "bd-sync-hint bd-sync-hint--differs" });
-      } else if (!c.conflict) {
-        hints.createSpan({ text: "Matches last sync", cls: "bd-sync-hint bd-sync-hint--same" });
+      const hintLabel =
+        c.hint === "Dirty"
+          ? "Not synced"
+          : c.hint === "Clean"
+            ? "Synced"
+            : c.hint === "New"
+              ? "Never pushed"
+              : c.hint;
+      hints.createSpan({ text: hintLabel, cls: `bd-sync-hint ${hintCls}` });
+      if (c.hint === "Dirty" || c.hint === "New") {
+        hints.createSpan({ text: "Ready to push", cls: "bd-sync-hint bd-sync-hint--differs" });
+      } else if (c.hint === "Conflict") {
+        hints.createSpan({ text: "Remote also changed", cls: "bd-sync-hint bd-sync-hint--differs" });
+      } else if (c.hint === "Clean") {
+        hints.createSpan({ text: "Up to date", cls: "bd-sync-hint bd-sync-hint--same" });
       }
 
       const controls = el.createDiv({ cls: "bd-sync-panel-row-controls" });
@@ -1159,6 +1346,46 @@ export class SyncPanelModal extends Modal {
               row.discordSyncEnabled = on;
             });
           });
+      }
+
+      if (c.conflict || c.hint === "Conflict") {
+        const conflictActions = el.createDiv({ cls: "bd-sync-panel-conflict-actions" });
+        conflictActions.createDiv({
+          text: "Both sides changed. Review the diff, keep local (then push), or take remote. Or just push to overwrite remote.",
+          cls: "setting-item-description",
+        });
+        new Setting(conflictActions)
+          .addButton((btn) =>
+            btn.setButtonText("Review…").setCta().setDisabled(this.busy).onClick(() => {
+              if (this.busy) return;
+              new ResolveSyncModal(
+                this.app,
+                c.file,
+                this.settings,
+                this.saveSettings,
+                this.client,
+                this.slugIndex,
+                () => {
+                  void this.reloadRows();
+                  this.opts.onDone?.();
+                }
+              ).open();
+            })
+          )
+          .addButton((btn) =>
+            btn.setButtonText("Keep local").setDisabled(this.busy).onClick(() => {
+              void this.keepLocalConflict(row);
+            })
+          )
+          .addButton((btn) =>
+            btn
+              .setButtonText("Take remote")
+              .setDestructive()
+              .setDisabled(this.busy)
+              .onClick(() => {
+                void this.takeRemoteConflict(row);
+              })
+          );
       }
     }
 
@@ -1198,7 +1425,7 @@ export class SyncPanelModal extends Modal {
       this.statusEl.setText(
         n === 0
           ? "Select at least one note to push."
-          : `${n} note${n === 1 ? "" : "s"} will be pushed.`
+          : `${n} note${n === 1 ? "" : "s"} will be pushed (overwrites remote if it changed).`
       );
     }
     const buttons = this.contentEl.querySelectorAll("button.mod-cta");
@@ -1208,6 +1435,63 @@ export class SyncPanelModal extends Modal {
       lastCta.setText(
         this.opts.force ? `Force push selected (${n})` : `Push selected (${n})`
       );
+    }
+  }
+
+  private async reloadRows() {
+    try {
+      const candidates = await listPublishCandidates(this.app, this.settings, {
+        includePath: this.focusPath || undefined,
+        underPath: this.scopePath || undefined,
+      });
+      const prev = new Map(this.rows.map((r) => [r.candidate.path, r]));
+      this.rows = candidates.map((c) => {
+        const old = prev.get(c.path);
+        return {
+          candidate: c,
+          checked: old ? old.checked : c.defaultChecked,
+          status: old?.status ?? c.status,
+          discordSyncEnabled: old?.discordSyncEnabled ?? c.discordSyncEnabled,
+        };
+      });
+    } catch (e) {
+      noticeError(e);
+    }
+    this.render();
+  }
+
+  private async keepLocalConflict(row: SyncRowState) {
+    if (this.busy) return;
+    clearConflictPath(this.settings, row.candidate.path);
+    await this.saveSettings();
+    new Notice(`BackDrop: kept local — ${row.candidate.title}`);
+    await this.reloadRows();
+    this.opts.onDone?.();
+  }
+
+  private async takeRemoteConflict(row: SyncRowState) {
+    if (this.busy) return;
+    this.busy = true;
+    this.render();
+    try {
+      await pullCurrentNote(
+        this.app,
+        this.client,
+        this.settings,
+        this.saveSettings,
+        row.candidate.path,
+        this.slugIndex
+      );
+      clearConflictPath(this.settings, row.candidate.path);
+      await this.saveSettings();
+      new Notice(`BackDrop: took remote — ${row.candidate.title}`);
+      this.busy = false;
+      await this.reloadRows();
+      this.opts.onDone?.();
+    } catch (e) {
+      noticeError(e);
+      this.busy = false;
+      this.render();
     }
   }
 
@@ -1230,7 +1514,8 @@ export class SyncPanelModal extends Modal {
           file: r.candidate.file,
           status: r.status,
           discordSyncEnabled: r.candidate.showDiscord ? r.discordSyncEnabled : undefined,
-          force: this.opts.force === true,
+          // Sync panel = explicit push approval. Always overwrite remote when timestamps diverge.
+          force: true,
         })),
         this.slugIndex
       );
@@ -1267,69 +1552,244 @@ export class SyncConfirmModal extends SyncPanelModal {
   }
 }
 
-/** List notes marked conflict after a safe pull; open Resolve sync per path. */
+/** List notes marked conflict after a safe pull; resolve, keep, or take remote. */
 export class ConflictListModal extends Modal {
+  private busy = false;
+  /** Working list — must not keep pointing at the pull-time snapshot forever. */
+  private remaining: string[] = [];
+  private countEl: HTMLElement | null = null;
+  private listEl: HTMLElement | null = null;
+  private emptyEl: HTMLElement | null = null;
+  private rowEls = new Map<string, HTMLElement>();
+
   constructor(
     app: App,
     private settings: BackdropSettings,
     private saveSettings: () => Promise<void>,
+    private client: BackdropClient,
+    private slugIndex: WikiSlugIndex,
     private onResolveNote: (file: TFile) => void,
-    private paths?: string[]
+    private onAfter: () => void,
+    paths?: string[]
   ) {
     super(app);
+    const seed = (paths?.length ? paths : settings.conflictPaths || []).map((p) =>
+      normalizePath(p)
+    );
+    this.remaining = [...new Set(seed)];
   }
 
-  onOpen() {
+  private async dismissPath(path: string) {
+    const norm = normalizePath(path);
+    this.remaining = this.remaining.filter((p) => p !== norm);
+    clearConflictPath(this.settings, norm);
+    await this.saveSettings();
+    this.removeRow(norm);
+    this.onAfter();
+  }
+
+  private removeRow(path: string) {
+    const row = this.rowEls.get(path);
+    if (row) {
+      row.remove();
+      this.rowEls.delete(path);
+    }
+    this.updateChrome();
+  }
+
+  private updateChrome() {
+    const n = this.remaining.length;
+    if (this.countEl) {
+      this.countEl.setText(`${n} conflict${n === 1 ? "" : "s"}`);
+    }
+    if (n === 0) {
+      this.listEl?.empty();
+      this.rowEls.clear();
+      if (this.emptyEl) {
+        this.emptyEl.removeClass("bd-hidden");
+        this.emptyEl.setText("No conflicts right now.");
+      }
+    }
+  }
+
+  private setBusy(on: boolean) {
+    this.busy = on;
+    this.contentEl.querySelectorAll("button").forEach((btn) => {
+      (btn as HTMLButtonElement).disabled = on;
+    });
+  }
+
+  private async takeRemote(file: TFile) {
+    await pullCurrentNote(
+      this.app,
+      this.client,
+      this.settings,
+      this.saveSettings,
+      file.path,
+      this.slugIndex
+    );
+  }
+
+  async onOpen() {
+    this.modalEl.addClass("bd-conflict-list-modal");
+    this.buildShell();
+  }
+
+  private buildShell() {
     const { contentEl } = this;
     contentEl.empty();
+    this.rowEls.clear();
     contentEl.createEl("h2", { text: "Sync conflicts" });
     contentEl.createEl("p", {
-      text: "These notes have local edits that were not overwritten by pull. Choose Keep local, Take remote, or Sync local for each.",
+      text: "Pull skipped these notes because you have local edits and remote also changed. Review the diff, keep local, take remote, or push later.",
       cls: "setting-item-description",
     });
 
-    const listed = (this.paths?.length ? this.paths : this.settings.conflictPaths || []).map(
-      (p) => normalizePath(p)
+    const header = new Setting(contentEl);
+    this.countEl = header.nameEl;
+    this.countEl.setText(
+      `${this.remaining.length} conflict${this.remaining.length === 1 ? "" : "s"}`
     );
-    const unique = [...new Set(listed)];
-
-    if (!unique.length) {
-      contentEl.createEl("p", { text: "No conflicts right now." });
-      return;
-    }
-
-    const list = contentEl.createDiv({ cls: "bd-conflict-list" });
-    for (const path of unique) {
-      const row = list.createDiv({ cls: "bd-conflict-list-row" });
-      const file = this.app.vault.getAbstractFileByPath(path);
-      const label = row.createDiv({ cls: "bd-conflict-list-path" });
-      label.setText(path);
-      if (!(file instanceof TFile)) {
-        label.addClass("bd-conflict-list-missing");
-        new Setting(row).addButton((btn) =>
-          btn.setButtonText("Dismiss").onClick(async () => {
-            clearConflictPath(this.settings, path);
-            await this.saveSettings();
-            this.onOpen();
-          })
-        );
-        continue;
-      }
-      new Setting(row).addButton((btn) =>
-        btn.setButtonText("Resolve…").setCta().onClick(() => {
-          this.close();
-          this.onResolveNote(file);
-        })
+    header
+      .setDesc("Bulk actions apply without opening each diff.")
+      .addButton((btn) =>
+        btn.setButtonText("Keep all local").onClick(() => void this.keepAllLocal())
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText("Take all remote")
+          .setDestructive()
+          .onClick(() => void this.takeAllRemote())
       );
+
+    this.emptyEl = contentEl.createEl("p", {
+      text: "No conflicts right now.",
+      cls: "bd-hidden",
+    });
+    this.listEl = contentEl.createDiv({ cls: "bd-conflict-list" });
+
+    if (!this.remaining.length) {
+      this.emptyEl.removeClass("bd-hidden");
+    } else {
+      for (const path of this.remaining) this.mountRow(path);
     }
 
     new Setting(contentEl).addButton((btn) =>
-      btn.setButtonText("Close").onClick(() => this.close())
+      btn.setButtonText("Close").onClick(() => {
+        if (!this.busy) this.close();
+      })
     );
+  }
+
+  private mountRow(path: string) {
+    if (!this.listEl) return;
+    const row = this.listEl.createDiv({ cls: "bd-conflict-list-row" });
+    this.rowEls.set(path, row);
+    const file = this.app.vault.getAbstractFileByPath(path);
+    const meta = row.createDiv({ cls: "bd-conflict-list-meta" });
+
+    if (!(file instanceof TFile)) {
+      meta.createDiv({ text: path, cls: "bd-conflict-list-path bd-conflict-list-missing" });
+      new Setting(row).addButton((btn) =>
+        btn.setButtonText("Dismiss").onClick(() => void this.dismissPath(path))
+      );
+      return;
+    }
+
+    const cache = this.app.metadataCache.getFileCache(file);
+    const fm = frontmatterRecord(cache);
+    const title = String(fm?.title || file.basename);
+    meta.createDiv({ text: title, cls: "bd-conflict-list-title" });
+    meta.createDiv({ text: path, cls: "bd-conflict-list-path" });
+
+    const btns = row.createDiv({ cls: "bd-conflict-list-actions" });
+    new Setting(btns)
+      .addButton((btn) =>
+        btn.setButtonText("Review…").setCta().onClick(() => {
+          if (this.busy) return;
+          this.close();
+          this.onResolveNote(file);
+        })
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Keep local").onClick(async () => {
+          if (this.busy) return;
+          await this.dismissPath(path);
+          new Notice(`BackDrop: kept local — ${title}`);
+        })
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText("Take remote")
+          .setDestructive()
+          .onClick(async () => {
+            if (this.busy) return;
+            this.setBusy(true);
+            try {
+              await this.takeRemote(file);
+              await this.dismissPath(path);
+              new Notice(`BackDrop: took remote — ${title}`);
+            } catch (e) {
+              noticeError(e);
+            } finally {
+              this.setBusy(false);
+            }
+          })
+      );
+  }
+
+  private async keepAllLocal() {
+    if (this.busy || !this.remaining.length) return;
+    this.setBusy(true);
+    const paths = [...this.remaining];
+    for (const path of paths) {
+      this.remaining = this.remaining.filter((p) => p !== path);
+      clearConflictPath(this.settings, path);
+      this.removeRow(path);
+    }
+    await this.saveSettings();
+    new Notice("BackDrop: cleared all conflict flags (kept local).");
+    this.setBusy(false);
+    this.onAfter();
+  }
+
+  private async takeAllRemote() {
+    if (this.busy || !this.remaining.length) return;
+    this.setBusy(true);
+    let ok = 0;
+    let failed = 0;
+    const paths = [...this.remaining];
+    for (const path of paths) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof TFile)) {
+        this.remaining = this.remaining.filter((p) => p !== path);
+        clearConflictPath(this.settings, path);
+        this.removeRow(path);
+        continue;
+      }
+      try {
+        await this.takeRemote(file);
+        this.remaining = this.remaining.filter((p) => p !== path);
+        clearConflictPath(this.settings, path);
+        this.removeRow(path);
+        ok += 1;
+      } catch (e) {
+        failed += 1;
+        noticeError(e, path);
+      }
+    }
+    await this.saveSettings();
+    new Notice(`BackDrop: took remote for ${ok}` + (failed ? `, ${failed} failed` : ""));
+    this.setBusy(false);
+    this.onAfter();
   }
 
   onClose() {
     this.contentEl.empty();
+    this.rowEls.clear();
+    this.countEl = null;
+    this.listEl = null;
+    this.emptyEl = null;
   }
 }
 

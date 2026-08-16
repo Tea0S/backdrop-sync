@@ -40,7 +40,7 @@ export interface BackdropSettings {
   contentHashes: Record<string, string>;
   /** Pull pack metadata keyed by world slug (categories, tags, lanes, eras). */
   worldCatalogs: Record<string, WorldCatalogMeta>;
-  /** Vault paths skipped as dirty on pull (or remote-newer + dirty). */
+  /** Vault paths with a real dual-edit (local changes and a newer remote). */
   conflictPaths: string[];
   /** Last world slug used for pull or new-note create (modal preselect). */
   lastWorldSlug: string;
@@ -101,6 +101,9 @@ export interface TimelineFrontmatter {
   event_kind?: string;
   calendar_date?: Record<string, unknown> | null;
   end_calendar_date?: Record<string, unknown> | null;
+  /** exact | approximate | unknown (Undated in the web builder). */
+  date_precision?: string;
+  date_granularity?: string;
   lane?: string;
   era?: string;
   header_image_url?: string;
@@ -162,6 +165,8 @@ export interface PullPack {
     event_kind?: string;
     calendar_date?: Record<string, unknown> | null;
     end_calendar_date?: Record<string, unknown> | null;
+    date_precision?: string;
+    date_granularity?: string;
     lane_id?: string | null;
     era_id?: string | null;
     header_image_url?: string | null;

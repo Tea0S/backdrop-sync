@@ -8,6 +8,8 @@ import {
   Plugin,
   Setting,
   TFile,
+  TFolder,
+  TAbstractFile,
   normalizePath,
 } from "obsidian";
 import { BackdropClient, noticeError } from "./src/api";
@@ -16,7 +18,6 @@ import { BackdropSettingTab } from "./src/settings";
 import {
   buildNoteFile,
   frontmatterRecord,
-  hashContent,
   parseWorldSlugs,
   normalizeSlugInput,
   slugify,
@@ -27,6 +28,7 @@ import {
   createWikiStub,
   defaultCategorySlug,
   getSyncBadgeState,
+  healSpuriousConflicts,
   listWorldCategoryOptions,
   pullAll,
   pullCurrentNote,
@@ -56,6 +58,7 @@ import {
   syncedWorldLabel,
 } from "./src/syncSelection";
 import { WikiSlugIndex, scanWikiSlugIndex } from "./src/wikiLinks";
+import { contentMatchesStoredHash, hashNoteForSync } from "./src/syncState";
 
 export default class BackdropPlugin extends Plugin {
   settings: BackdropSettings = DEFAULT_SETTINGS;
@@ -70,6 +73,8 @@ export default class BackdropPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    const healed = await healSpuriousConflicts(this.app, this.settings);
+    if (healed) await this.saveSettings();
     this.client = new BackdropClient(
       () => this.settings.apiBaseUrl,
       () => this.settings.apiKey
@@ -120,6 +125,26 @@ export default class BackdropPlugin extends Plugin {
     this.addRibbonIcon("book-plus", "New wiki article", () => {
       this.openNewWikiArticle();
     });
+
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        this.addBackdropFileMenuItems(menu, file);
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, _editor, view) => {
+        const file = view.file;
+        if (!(file instanceof TFile) || !this.isBackdropNoteSync(file)) return;
+        menu.addItem((item) =>
+          item
+            .setTitle("BackDrop: Sync to BackDrop…")
+            .setIcon("upload")
+            .onClick(() => {
+              this.openSyncPanel({ focusFile: file });
+            })
+        );
+      })
+    );
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
@@ -579,7 +604,12 @@ export default class BackdropPlugin extends Plugin {
       this.app,
       this.settings,
       () => this.saveSettings(),
+      this.client,
+      this.slugIndex,
       (file) => this.openResolveSync(file),
+      () => {
+        void this.refreshSyncBadge();
+      },
       list
     ).open();
   }
@@ -670,7 +700,7 @@ export default class BackdropPlugin extends Plugin {
 
   async runPull() {
     try {
-      const { conflicts } = await pullAll(
+      await pullAll(
         this.app,
         this.client,
         this.settings,
@@ -682,9 +712,7 @@ export default class BackdropPlugin extends Plugin {
         this.slugIndex
       );
       void this.refreshSyncBadge();
-      if (conflicts.length) {
-        this.openConflictList(conflicts);
-      }
+      // Don't hijack the UI with the conflict modal — notice already has Review.
     } catch (e) {
       noticeError(e);
     }
@@ -711,7 +739,14 @@ export default class BackdropPlugin extends Plugin {
     }
   }
 
-  openSyncPanel(opts: { focusFile?: TFile | null; force?: boolean } = {}) {
+  openSyncPanel(
+    opts: {
+      focusFile?: TFile | null;
+      force?: boolean;
+      underPath?: string;
+      scopeLabel?: string;
+    } = {}
+  ) {
     new SyncPanelModal(
       this.app,
       this.settings,
@@ -721,11 +756,82 @@ export default class BackdropPlugin extends Plugin {
       {
         force: opts.force === true,
         focusFile: opts.focusFile ?? null,
+        underPath: opts.underPath,
+        scopeLabel: opts.scopeLabel,
         onDone: () => {
           void this.refreshSyncBadge();
         },
       }
     ).open();
+  }
+
+  /** Right-click Sync for a BackDrop note or a world/category folder under vault root. */
+  private addBackdropFileMenuItems(menu: Menu, file: TAbstractFile) {
+    const root = this.settings.vaultRoot.replace(/\/+$/, "");
+    if (!root) return;
+    const path = normalizePath(file.path);
+
+    if (file instanceof TFile && file.extension === "md" && this.isBackdropNoteSync(file)) {
+      const inConflict = (this.settings.conflictPaths || []).map(normalizePath).includes(path);
+      if (inConflict) {
+        menu.addItem((item) =>
+          item
+            .setTitle("BackDrop: Resolve conflict…")
+            .setIcon("git-compare")
+            .onClick(() => {
+              this.openResolveSync(file);
+            })
+        );
+      }
+      menu.addItem((item) =>
+        item
+          .setTitle("BackDrop: Sync to BackDrop…")
+          .setIcon("upload")
+          .onClick(() => {
+            this.openSyncPanel({ focusFile: file });
+          })
+      );
+      return;
+    }
+
+    if (!(file instanceof TFolder)) return;
+    const underRoot = path === root || path.startsWith(`${root}/`);
+    if (!underRoot) return;
+
+    const label = this.syncScopeLabelForFolder(path, root);
+    menu.addItem((item) =>
+      item
+        .setTitle(`BackDrop: Sync ${label}…`)
+        .setIcon("upload")
+        .onClick(() => {
+          this.openSyncPanel({ underPath: path, scopeLabel: label });
+        })
+    );
+  }
+
+  /** Human label for folder sync menu / panel (world, category, wiki, timeline, …). */
+  private syncScopeLabelForFolder(folderPath: string, vaultRoot: string): string {
+    const path = normalizePath(folderPath).replace(/\/+$/, "");
+    const root = vaultRoot.replace(/\/+$/, "");
+    const rel =
+      path === root
+        ? ""
+        : path.startsWith(`${root}/`)
+          ? path.slice(root.length + 1)
+          : path;
+    if (!rel) return "vault";
+    const parts = rel.split("/").filter(Boolean);
+    if (parts.length === 1) return `world “${parts[0]}”`;
+    if (parts.length === 2 && (parts[1] === "wiki" || parts[1] === "timeline")) {
+      return `${parts[1]} in “${parts[0]}”`;
+    }
+    if (parts.length >= 3 && parts[1] === "wiki") {
+      return `category “${parts.slice(2).join("/")}”`;
+    }
+    if (parts.length >= 3 && parts[1] === "timeline") {
+      return `timeline in “${parts[0]}”`;
+    }
+    return `“${parts[parts.length - 1]}”`;
   }
 
   /** @deprecated Prefer openSyncPanel. */
@@ -870,12 +976,18 @@ export default class BackdropPlugin extends Plugin {
       return;
     }
     if (published && currentSlug) return;
+    const path = normalizePath(file.path);
+    const prevHash = this.settings.contentHashes[path];
+    const wasClean = contentMatchesStoredHash(content, prevHash);
     const fm = { ...data, backdrop_slug: nextSlug, title };
     const next = buildNoteFile(fm, body);
-    // Avoid feedback loops: update hash before modify so pull dirty checks stay sane.
-    this.settings.contentHashes[normalizePath(file.path)] = hashContent(next);
+    // Only re-baseline hash when the note was already clean. Never clear "not synced"
+    // by rewriting the slug after the user has local edits.
+    if (wasClean) {
+      this.settings.contentHashes[path] = hashNoteForSync(next);
+      await this.saveSettings();
+    }
     await this.app.vault.modify(file, next);
-    await this.saveSettings();
     this.slugIndex.setEntry({
       slug: nextSlug,
       world: String(data.backdrop_world || ""),

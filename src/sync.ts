@@ -3,8 +3,8 @@ import type { BackdropClient } from "./api";
 import { BackdropApiError, noticeError, sleepMs } from "./api";
 import {
   buildNoteFile,
+  calendarDateForPublish,
   frontmatterRecord,
-  hashContent,
   parseWorldSlugs,
   splitFrontmatter,
   timelineFrontmatterFromEvent,
@@ -16,6 +16,13 @@ import {
   slugify,
   safePathSegment,
 } from "./frontmatter";
+import {
+  contentMatchesStoredHash,
+  decidePullAction,
+  hashNoteForSync,
+  remoteIsNewer,
+  type PullDecision,
+} from "./syncState";
 import type { BackdropSettings, PullPack, SyncBadgeState, WorldCatalogMeta } from "./types";
 import { normalizeWikiBodyForVault } from "./markdown";
 import { resolvePullTargets } from "./syncSelection";
@@ -234,6 +241,40 @@ export function clearConflictPath(settings: BackdropSettings, path: string): voi
   settings.conflictPaths = settings.conflictPaths.filter((p) => p !== norm);
 }
 
+/**
+ * Drop conflict flags that only exist because synced_at lagged updated_at by ms
+ * after a successful sync (false dual-edit). Real conflicts stay when remote is newer.
+ */
+export async function healSpuriousConflicts(
+  app: App,
+  settings: BackdropSettings
+): Promise<number> {
+  const paths = [...(settings.conflictPaths || [])].map((p) => normalizePath(p));
+  if (!paths.length) return 0;
+  let cleared = 0;
+  for (const path of paths) {
+    const file = app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      clearConflictPath(settings, path);
+      cleared += 1;
+      continue;
+    }
+    const content = await app.vault.read(file);
+    const { data } = splitFrontmatter(content);
+    const localSynced = String(data.backdrop_synced_at || "");
+    const remoteUpdated = String(data.backdrop_updated_at || "");
+    // Without a live pull we only know last-known remote stamp in FM.
+    // If that stamp isn't meaningfully newer than synced_at, this isn't a real conflict.
+    if (!remoteIsNewer(localSynced, remoteUpdated)) {
+      clearConflictPath(settings, path);
+      cleared += 1;
+    }
+  }
+  return cleared;
+}
+
+export { remoteIsNewer } from "./syncState";
+
 /** Map frontmatter tag names/slugs to API tag_ids using the cached pull catalog. */
 export function resolveTagIdsForPublish(
   settings: BackdropSettings,
@@ -269,11 +310,8 @@ export async function getSyncBadgeState(
   const path = normalizePath(file.path);
   const dirty = await fileIsDirty(app, file, settings);
   const inConflict = (settings.conflictPaths || []).includes(path);
-  const remoteUpdated = String(data.backdrop_updated_at || "");
-  const localSynced = String(data.backdrop_synced_at || "");
-  if (inConflict || (dirty && remoteUpdated && localSynced && remoteUpdated > localSynced)) {
-    return "conflict";
-  }
+  // Conflict is only for pull-detected dual edits (or explicit list), not every dirty note.
+  if (inConflict) return "conflict";
   if (dirty) return "dirty";
   return "clean";
 }
@@ -283,11 +321,11 @@ export function syncBadgeLabel(state: SyncBadgeState): string {
     case "conflict":
       return "BackDrop · Conflict";
     case "dirty":
-      return "BackDrop · Dirty";
+      return "BackDrop · Not synced";
     case "unpublished":
-      return "BackDrop · Unpublished";
+      return "BackDrop · Never pushed";
     default:
-      return "BackDrop · Clean";
+      return "BackDrop · Synced";
   }
 }
 
@@ -330,33 +368,45 @@ function ensureFolderPath(app: App, folderPath: string): Promise<void> {
   })();
 }
 
+function rememberSyncedHash(settings: BackdropSettings, path: string, content: string): void {
+  settings.contentHashes[normalizePath(path)] = hashNoteForSync(content);
+}
+
 async function writeNote(
   app: App,
   path: string,
   content: string,
-  settings: BackdropSettings,
-  saveSettings: () => Promise<void>
+  settings: BackdropSettings
 ): Promise<"created" | "updated"> {
   const norm = normalizePath(path);
   const folder = norm.includes("/") ? norm.slice(0, norm.lastIndexOf("/")) : "";
   if (folder) await ensureFolderPath(app, folder);
   const existing = app.vault.getAbstractFileByPath(norm);
-  settings.contentHashes[norm] = hashContent(content);
+  let file: TFile;
+  let result: "created" | "updated";
   if (existing instanceof TFile) {
     await app.vault.modify(existing, content);
-    await saveSettings();
-    return "updated";
+    file = existing;
+    result = "updated";
+  } else {
+    file = await app.vault.create(norm, content);
+    result = "created";
   }
-  await app.vault.create(norm, content);
-  await saveSettings();
-  return "created";
+  // Hash what's on disk (Obsidian may rewrite line endings).
+  const onDisk = await app.vault.read(file);
+  rememberSyncedHash(settings, norm, onDisk);
+  return result;
 }
 
 export async function fileIsDirty(app: App, file: TFile, settings: BackdropSettings): Promise<boolean> {
   const content = await app.vault.read(file);
-  const prev = settings.contentHashes[normalizePath(file.path)];
-  if (!prev) return false;
-  return hashContent(content) !== prev;
+  const path = normalizePath(file.path);
+  const prev = settings.contentHashes[path];
+  if (contentMatchesStoredHash(content, prev)) return false;
+  if (prev) return true;
+  // No baseline: unpublished notes belong in the push list; published notes
+  // without a hash are treated dirty until the next successful pull rehashes them.
+  return true;
 }
 
 /** Frontmatter visibility for API push — Sync means push, not “set published”. */
@@ -373,32 +423,92 @@ export function normalizePublishStatusForType(type: string, raw: unknown): strin
   return s;
 }
 
-/**
- * True when full/startup pull must not overwrite this note.
- * Protects hash-dirty notes and unhashed notes whose body differs from remote.
- */
-async function isProtectedFromOverwrite(
-  app: App,
-  file: TFile,
-  settings: BackdropSettings,
-  remoteBody: string
-): Promise<{ protected: boolean; dirty: boolean }> {
-  const dirty = await fileIsDirty(app, file, settings);
-  if (dirty) return { protected: true, dirty: true };
-  const prev = settings.contentHashes[normalizePath(file.path)];
-  if (prev) return { protected: false, dirty: false };
+async function applyPullDecisionToExisting(opts: {
+  app: App;
+  file: TFile;
+  settings: BackdropSettings;
+  saveSettings: () => Promise<void>;
+  stats: SyncStats;
+  remoteUpdatedAt: string;
+  remoteFm: Record<string, unknown>;
+  vaultBody: string;
+  syncedAt: string;
+  worldSlug: string;
+  slugIndex: WikiSlugIndex;
+  mergeDiscord?: boolean;
+  article?: PullPack["articles"][0];
+}): Promise<"write" | "done"> {
+  const {
+    app,
+    file,
+    settings,
+    saveSettings,
+    stats,
+    remoteUpdatedAt,
+    remoteFm,
+    vaultBody,
+    syncedAt,
+    worldSlug,
+    slugIndex,
+  } = opts;
+  const path = normalizePath(file.path);
   const current = await app.vault.read(file);
-  const { body: localBody } = splitFrontmatter(current);
-  if ((localBody || "").trim() !== (remoteBody || "").trim()) {
-    return { protected: true, dirty: false };
-  }
-  return { protected: false, dirty: false };
-}
+  const { data, body } = splitFrontmatter(current);
+  const decision: PullDecision = decidePullAction({
+    localContent: current,
+    storedHash: settings.contentHashes[path],
+    localSyncedAt: String(data.backdrop_synced_at || ""),
+    remoteUpdatedAt,
+    remoteContent: buildNoteFile(remoteFm, vaultBody),
+  });
 
-/** Remote is newer (or timestamps unknown) so a pull would have written. */
-function remoteWouldOverwrite(localSynced: string, remoteUpdated: string): boolean {
-  if (!localSynced || !remoteUpdated) return true;
-  return remoteUpdated > localSynced;
+  const maybeMergeDiscord = async () => {
+    if (opts.mergeDiscord && opts.article) {
+      await mergeWikiDiscordMeta(app, file, opts.article, settings, saveSettings);
+    }
+  };
+
+  if (decision.action === "overwrite") {
+    return "write";
+  }
+
+  if (decision.action === "conflict") {
+    stats.skippedDirty += 1;
+    stats.conflicts.push(path);
+    addConflictPath(settings, path);
+    await maybeMergeDiscord();
+    return "done";
+  }
+
+  if (decision.action === "skip-dirty") {
+    stats.skippedDirty += 1;
+    await maybeMergeDiscord();
+    return "done";
+  }
+
+  if (decision.action === "stamp") {
+    const nextFm: Record<string, unknown> = {
+      ...data,
+      backdrop_updated_at: remoteUpdatedAt || data.backdrop_updated_at,
+      backdrop_synced_at: syncedAt,
+    };
+    const next = buildNoteFile(nextFm, body);
+    await app.vault.modify(file, next);
+    rememberSyncedHash(settings, path, next);
+    clearConflictPath(settings, path);
+    stats.skippedUnchanged += 1;
+    await maybeMergeDiscord();
+    return "done";
+  }
+
+  if (decision.rehash) {
+    rememberSyncedHash(settings, path, current);
+  }
+  clearConflictPath(settings, path);
+  await maybeMergeDiscord();
+  await normalizeLinksInPlace(app, file, worldSlug, slugIndex, settings, saveSettings);
+  stats.skippedUnchanged += 1;
+  return "done";
 }
 
 interface NoteIndex {
@@ -541,9 +651,135 @@ async function normalizeLinksInPlace(
   if (nextBody === body) return false;
   const next = buildNoteFile(data, nextBody);
   await app.vault.modify(file, next);
-  settings.contentHashes[normalizePath(file.path)] = hashContent(next);
-  await saveSettings();
+  rememberSyncedHash(settings, file.path, next);
   return true;
+}
+
+/** Discord publish flag from a pull-pack article (pin-sourced never Discord-sync). */
+function remoteDiscordSyncEnabled(article: PullPack["articles"][0]): boolean {
+  if (article.source === "pin") return false;
+  return Boolean(article.discord_sync_enabled);
+}
+
+/**
+ * Patch `discord_sync_enabled` (and missing `backdrop_source`) from remote without
+ * overwriting the body. Used when pull skips dirty/unchanged/existing notes so the
+ * Sync panel toggle matches BackDrop / Discord.
+ */
+async function mergeWikiDiscordMeta(
+  app: App,
+  file: TFile,
+  article: PullPack["articles"][0],
+  settings: BackdropSettings,
+  saveSettings: () => Promise<void>
+): Promise<boolean> {
+  const desired = remoteDiscordSyncEnabled(article);
+  const content = await app.vault.read(file);
+  const { data, body } = splitFrontmatter(content);
+  const path = normalizePath(file.path);
+  const prevHash = settings.contentHashes[path];
+  const wasClean = contentMatchesStoredHash(content, prevHash);
+
+  const localRaw = data.discord_sync_enabled;
+  const local =
+    localRaw === undefined
+      ? null
+      : localRaw === true || localRaw === "true";
+  const source = String(article.source || "").trim() || "manual";
+  const localSource = String(data.backdrop_source || "").trim();
+
+  let changed = false;
+  if (local !== desired) {
+    data.discord_sync_enabled = desired;
+    changed = true;
+  }
+  if (!localSource) {
+    data.backdrop_source = source;
+    changed = true;
+  }
+  if (!changed) return false;
+
+  const next = buildNoteFile(data, body);
+  await app.vault.modify(file, next);
+  if (wasClean) {
+    rememberSyncedHash(settings, path, next);
+  }
+  return true;
+}
+
+/** Resolve world slug from a vault path under `settings.vaultRoot`. */
+function worldSlugFromVaultPath(settings: BackdropSettings, vaultPath: string): string {
+  const root = settings.vaultRoot.replace(/\/+$/, "");
+  const under = normalizePath(vaultPath).replace(/\/+$/, "");
+  if (!under || (under !== root && !under.startsWith(`${root}/`))) return "";
+  const rest = under === root ? "" : under.slice(root.length).replace(/^\//, "");
+  return rest.split("/")[0] || "";
+}
+
+/**
+ * Pull wiki packs for the Sync panel scope and merge Discord flags into local notes
+ * without overwriting bodies. Fixes notes that never received `discord_sync_enabled`
+ * because startup/dirty pull skipped them.
+ */
+export async function refreshWikiDiscordFromRemote(
+  app: App,
+  client: BackdropClient,
+  settings: BackdropSettings,
+  saveSettings: () => Promise<void>,
+  opts: { underPath?: string; includePath?: string } = {}
+): Promise<number> {
+  const worlds = new Set<string>();
+  if (opts.underPath) {
+    const w = worldSlugFromVaultPath(settings, opts.underPath);
+    if (w) worlds.add(w);
+  }
+  if (opts.includePath) {
+    const abs = app.vault.getAbstractFileByPath(normalizePath(opts.includePath));
+    if (abs instanceof TFile) {
+      const content = await app.vault.read(abs);
+      const { data } = splitFrontmatter(content);
+      const w = String(data.backdrop_world || "").trim();
+      if (w) worlds.add(w);
+    }
+  }
+  if (!worlds.size) {
+    for (const row of settings.syncWorlds || []) {
+      if (row.syncWiki) worlds.add(row.slug);
+    }
+    if (!worlds.size) {
+      for (const slug of parseWorldSlugs(settings.worldSlugs)) worlds.add(slug);
+    }
+  }
+  if (!worlds.size) return 0;
+
+  let updated = 0;
+  for (const worldSlug of worlds) {
+    let pack: PullPack;
+    try {
+      pack = await client.pull(worldSlug);
+    } catch {
+      continue;
+    }
+    cacheWorldCatalog(settings, worldSlug, pack);
+    const wikiIndex = await indexWorldNotes(
+      app,
+      worldWikiRoot(settings.vaultRoot, worldSlug),
+      "backdrop_id",
+      "backdrop_slug"
+    );
+    for (const article of pack.articles || []) {
+      const file =
+        (article.id && wikiIndex.byId.get(article.id)) ||
+        (article.slug && wikiIndex.bySlug.get(article.slug)) ||
+        null;
+      if (!(file instanceof TFile)) continue;
+      if (await mergeWikiDiscordMeta(app, file, article, settings, saveSettings)) {
+        updated += 1;
+      }
+    }
+  }
+  await saveSettings();
+  return updated;
 }
 
 export async function pullWorld(
@@ -619,11 +855,13 @@ export async function pullWorld(
     // Startup: create missing only — no rename, no body overwrite.
     if (mode === "startup") {
       const atExpected = app.vault.getAbstractFileByPath(expectedNorm);
-      if (
-        atExpected instanceof TFile ||
-        wikiIndex.byId.has(article.id) ||
-        wikiIndex.bySlug.has(article.slug)
-      ) {
+      const existingStartup =
+        (atExpected instanceof TFile ? atExpected : null) ||
+        wikiIndex.byId.get(article.id) ||
+        wikiIndex.bySlug.get(article.slug) ||
+        null;
+      if (existingStartup instanceof TFile) {
+        await mergeWikiDiscordMeta(app, existingStartup, article, settings, saveSettings);
         stats.skippedExisting += 1;
         continue;
       }
@@ -634,7 +872,7 @@ export async function pullWorld(
         parentTitle,
       });
       const content = buildNoteFile(fm as unknown as Record<string, unknown>, vaultBody);
-      const result = await writeNote(app, expectedNorm, content, settings, saveSettings);
+      const result = await writeNote(app, expectedNorm, content, settings);
       if (result === "created") stats.created += 1;
       else stats.updated += 1;
       continue;
@@ -654,46 +892,39 @@ export async function pullWorld(
             slug: article.slug,
           });
 
-    if (existing instanceof TFile) {
-      if (mode === "full") {
-        const current = await app.vault.read(existing);
-        const { data } = splitFrontmatter(current);
-        const localSynced = String(data.backdrop_synced_at || "");
-        const remoteUpdated = String(article.updated_at || "");
-        const { protected: protect } = await isProtectedFromOverwrite(
-          app,
-          existing,
-          settings,
-          vaultBody
-        );
-        if (protect) {
-          stats.skippedDirty += 1;
-          // Only flag conflict when remote would have overwritten local work.
-          if (remoteWouldOverwrite(localSynced, remoteUpdated)) {
-            stats.conflicts.push(path);
-            addConflictPath(settings, path);
-          }
-          continue;
-        }
-        if (localSynced && remoteUpdated && remoteUpdated <= localSynced) {
-          await normalizeLinksInPlace(app, existing, worldSlug, linkIndex, settings, saveSettings);
-          stats.skippedUnchanged += 1;
-          continue;
-        }
-      }
-      // force-current: always overwrite
-    } else if (mode === "force-current") {
-      continue;
-    }
-
     const parentTitle = article.parent_article_id
       ? articleTitleById.get(article.parent_article_id) || ""
       : "";
     const fm = wikiFrontmatterFromArticle(worldSlug, article, syncedAt, {
       parentTitle,
     });
+
+    if (existing instanceof TFile) {
+      if (mode === "full") {
+        const decision = await applyPullDecisionToExisting({
+          app,
+          file: existing,
+          settings,
+          saveSettings,
+          stats,
+          remoteUpdatedAt: String(article.updated_at || ""),
+          remoteFm: fm as unknown as Record<string, unknown>,
+          vaultBody,
+          syncedAt,
+          worldSlug,
+          slugIndex: linkIndex,
+          mergeDiscord: true,
+          article,
+        });
+        if (decision === "done") continue;
+      }
+      // force-current: always overwrite
+    } else if (mode === "force-current") {
+      continue;
+    }
+
     const content = buildNoteFile(fm as unknown as Record<string, unknown>, vaultBody);
-    const result = await writeNote(app, path, content, settings, saveSettings);
+    const result = await writeNote(app, path, content, settings);
     clearConflictPath(settings, path);
     if (result === "created") stats.created += 1;
     else stats.updated += 1;
@@ -742,7 +973,7 @@ export async function pullWorld(
         syncedAt
       );
       const content = buildNoteFile(fm as unknown as Record<string, unknown>, vaultBody);
-      const result = await writeNote(app, expectedNorm, content, settings, saveSettings);
+      const result = await writeNote(app, expectedNorm, content, settings);
       if (result === "created") stats.created += 1;
       else stats.updated += 1;
       continue;
@@ -761,37 +992,6 @@ export async function pullWorld(
             id: event.id,
           });
 
-    if (existing instanceof TFile) {
-      if (mode === "full") {
-        const current = await app.vault.read(existing);
-        const { data } = splitFrontmatter(current);
-        const localSynced = String(data.backdrop_synced_at || "");
-        const remoteUpdated = String(event.updated_at || "");
-        const { protected: protect } = await isProtectedFromOverwrite(
-          app,
-          existing,
-          settings,
-          vaultBody
-        );
-        if (protect) {
-          stats.skippedDirty += 1;
-          if (remoteWouldOverwrite(localSynced, remoteUpdated)) {
-            stats.conflicts.push(path);
-            addConflictPath(settings, path);
-          }
-          continue;
-        }
-        if (localSynced && remoteUpdated && remoteUpdated <= localSynced) {
-          await normalizeLinksInPlace(app, existing, worldSlug, linkIndex, settings, saveSettings);
-          stats.skippedUnchanged += 1;
-          continue;
-        }
-      }
-      // force-current: always overwrite
-    } else if (mode === "force-current") {
-      continue;
-    }
-
     const fm = timelineFrontmatterFromEvent(
       worldSlug,
       event,
@@ -799,8 +999,31 @@ export async function pullWorld(
       eraById.get(String(event.era_id || "")) || "",
       syncedAt
     );
+
+    if (existing instanceof TFile) {
+      if (mode === "full") {
+        const decision = await applyPullDecisionToExisting({
+          app,
+          file: existing,
+          settings,
+          saveSettings,
+          stats,
+          remoteUpdatedAt: String(event.updated_at || ""),
+          remoteFm: fm as unknown as Record<string, unknown>,
+          vaultBody,
+          syncedAt,
+          worldSlug,
+          slugIndex: linkIndex,
+        });
+        if (decision === "done") continue;
+      }
+      // force-current: always overwrite
+    } else if (mode === "force-current") {
+      continue;
+    }
+
     const content = buildNoteFile(fm as unknown as Record<string, unknown>, vaultBody);
-    const result = await writeNote(app, path, content, settings, saveSettings);
+    const result = await writeNote(app, path, content, settings);
     clearConflictPath(settings, path);
     if (result === "created") stats.created += 1;
     else stats.updated += 1;
@@ -824,9 +1047,7 @@ export async function pullWorld(
     }
   }
 
-  if (stats.conflicts.length) {
-    await saveSettings();
-  }
+  await saveSettings();
 
   if (slugIndex) {
     await rebuildWikiSlugIndex(app, slugIndex, settings.vaultRoot);
@@ -874,6 +1095,7 @@ export async function pullAll(
   let updated = 0;
   let dirty = 0;
   let skippedExisting = 0;
+  let skippedUnchanged = 0;
   const conflicts: string[] = [];
   const articleStatusCounts: Record<string, number> = {};
   const eventStatusCounts: Record<string, number> = {};
@@ -900,6 +1122,7 @@ export async function pullAll(
         updated += stats.updated;
         dirty += stats.skippedDirty;
         skippedExisting += stats.skippedExisting;
+        skippedUnchanged += stats.skippedUnchanged;
         conflicts.push(...stats.conflicts);
         for (const [k, n] of Object.entries(stats.articleStatusCounts || {})) {
           articleStatusCounts[k] = (articleStatusCounts[k] || 0) + n;
@@ -929,6 +1152,7 @@ export async function pullAll(
     const conflictN = uniqueConflicts.length;
     const notice = new Notice(
       `BackDrop pull: ${created} created, ${updated} updated` +
+        (skippedUnchanged ? `, ${skippedUnchanged} already in sync` : "") +
         (dirty ? `, ${dirty} skipped (local edits kept)` : "") +
         (conflictN
           ? ` · ${conflictN} conflict${conflictN === 1 ? "" : "s"} — open Review sync conflicts`
@@ -1093,6 +1317,7 @@ export async function publishFile(
     rewriteObsidianToSlugs(bodyWithMedia, worldSlug, linkIndex)
   );
   const ifUpdated = String(data.backdrop_updated_at || "") || undefined;
+  const force = opts.force === true;
 
   if (type === "wiki") {
     const payload: Record<string, unknown> = {
@@ -1102,9 +1327,11 @@ export async function publishFile(
       body_markdown: bodyForApi,
       summary: data.summary != null ? String(data.summary) : "",
       status: normalizePublishStatusForType("wiki", data.status),
-      if_updated_at: ifUpdated,
-      force: opts.force === true,
+      force,
     };
+    // Optimistic lock only when not forcing. Omit if_updated_at on force so push
+    // still works if production ignores the `force` flag (older API builds).
+    if (!force && ifUpdated) payload.if_updated_at = ifUpdated;
     if ("thumbnail_url" in data) {
       payload.thumbnail_url = data.thumbnail_url ? String(data.thumbnail_url) : null;
     }
@@ -1145,12 +1372,32 @@ export async function publishFile(
         ({ article } = await client.createWikiArticle(worldSlug, payload));
       }
     } catch (e) {
-      if (e instanceof BackdropApiError && e.status === 409) {
-        throw new Error("Remote changed since last pull. Pull again or force sync.");
+      if (e instanceof BackdropApiError && e.status === 409 && !force) {
+        // Retry once as an explicit overwrite (Sync panel / user intent).
+        const retry: Record<string, unknown> = { ...payload, force: true };
+        delete retry.if_updated_at;
+        try {
+          if (id) {
+            ({ article } = await client.updateWikiArticle(worldSlug, id, retry));
+          } else {
+            throw e;
+          }
+        } catch (e2) {
+          if (e2 instanceof BackdropApiError && e2.status === 409) {
+            throw new Error("Remote changed since last pull. Use Review / Take remote, or Force sync.");
+          }
+          throw e2;
+        }
+      } else if (e instanceof BackdropApiError && e.status === 409) {
+        throw new Error("Remote changed since last pull. Use Review / Take remote, or Force sync.");
+      } else {
+        throw e;
       }
-      throw e;
     }
     const syncedAt = new Date().toISOString();
+    const remoteStamp = String(article.updated_at || syncedAt);
+    // Keep synced_at >= updated_at so local edits aren't mislabeled as conflicts.
+    const alignedSync = remoteIsNewer(syncedAt, remoteStamp) ? remoteStamp : syncedAt;
     const publishedChars = Array.isArray(article.characters)
       ? (article.characters as Array<{ character_name?: string; muse_id?: string | null }>)
       : null;
@@ -1205,8 +1452,8 @@ export async function publishFile(
         ? article.map_region_ids
         : data.map_region_ids || [],
       parent_article_id: parentId || null,
-      backdrop_updated_at: article.updated_at || syncedAt,
-      backdrop_synced_at: syncedAt,
+      backdrop_updated_at: remoteStamp,
+      backdrop_synced_at: alignedSync,
     };
     // Preserve non-empty user tags if present; never inject empty `tags: []`.
     if (!Array.isArray(fm.tags) || fm.tags.length === 0) delete fm.tags;
@@ -1215,7 +1462,7 @@ export async function publishFile(
     // Keep Obsidian title-form links in the vault (do not write API slug body back).
     const next = buildNoteFile(fm, bodyWithMedia);
     await app.vault.modify(file, next);
-    settings.contentHashes[normalizePath(file.path)] = hashContent(next);
+    rememberSyncedHash(settings, file.path, next);
     clearConflictPath(settings, file.path);
     await saveSettings();
     if (opts.slugIndex) {
@@ -1238,19 +1485,40 @@ export async function publishFile(
     body_markdown: bodyForApi,
     status: normalizePublishStatusForType("timeline", data.status),
     event_kind: String(data.event_kind || "scene"),
-    calendar_date: data.calendar_date ?? null,
-    end_calendar_date: data.end_calendar_date ?? null,
     header_image_url: data.header_image_url || null,
-    if_updated_at: ifUpdated,
-    force: opts.force === true,
+    force,
   };
+  // Prefer Obsidian's metadata cache for nested calendar maps (Properties UI rewrite),
+  // then file YAML. Never send empty/null dates on update — that wiped remote chronology.
+  const cacheFm = frontmatterRecord(app.metadataCache.getFileCache(file));
+  const calendarDate =
+    calendarDateForPublish(data.calendar_date) ||
+    calendarDateForPublish(cacheFm?.calendar_date);
+  const endCalendarDate =
+    calendarDateForPublish(data.end_calendar_date) ||
+    calendarDateForPublish(cacheFm?.end_calendar_date);
+  const id = String(data.backdrop_id || "").trim();
+  if (calendarDate) {
+    payload.calendar_date = calendarDate;
+  } else if (!id) {
+    payload.calendar_date = { era: "", year: 0, month: 0, day: 0 };
+  }
+  if (endCalendarDate) {
+    payload.end_calendar_date = endCalendarDate;
+  } else if ("end_calendar_date" in data || (cacheFm && "end_calendar_date" in cacheFm)) {
+    payload.end_calendar_date = null;
+  }
+  const precision = String(data.date_precision || cacheFm?.date_precision || "").trim();
+  if (precision === "exact" || precision === "approximate" || precision === "unknown") {
+    payload.date_precision = precision;
+  }
+  if (!force && ifUpdated) payload.if_updated_at = ifUpdated;
   if (typeof data.lane === "string" && /^[0-9a-f-]{36}$/i.test(data.lane)) {
     payload.lane_id = data.lane;
   }
   if (typeof data.era === "string" && /^[0-9a-f-]{36}$/i.test(data.era)) {
     payload.era_id = data.era;
   }
-  const id = String(data.backdrop_id || "").trim();
   let event: Record<string, unknown>;
   try {
     if (id) {
@@ -1259,12 +1527,30 @@ export async function publishFile(
       ({ event } = await client.createTimelineEvent(worldSlug, payload));
     }
   } catch (e) {
-    if (e instanceof BackdropApiError && e.status === 409) {
-      throw new Error("Remote changed since last pull. Pull again or force sync.");
+    if (e instanceof BackdropApiError && e.status === 409 && !force) {
+      const retry: Record<string, unknown> = { ...payload, force: true };
+      delete retry.if_updated_at;
+      try {
+        if (id) {
+          ({ event } = await client.updateTimelineEvent(worldSlug, id, retry));
+        } else {
+          throw e;
+        }
+      } catch (e2) {
+        if (e2 instanceof BackdropApiError && e2.status === 409) {
+          throw new Error("Remote changed since last pull. Use Review / Take remote, or Force sync.");
+        }
+        throw e2;
+      }
+    } else if (e instanceof BackdropApiError && e.status === 409) {
+      throw new Error("Remote changed since last pull. Use Review / Take remote, or Force sync.");
+    } else {
+      throw e;
     }
-    throw e;
   }
   const syncedAt = new Date().toISOString();
+  const remoteStamp = String(event.updated_at || syncedAt);
+  const alignedSync = remoteIsNewer(syncedAt, remoteStamp) ? remoteStamp : syncedAt;
   const fm = {
     ...data,
     backdrop_type: "timeline",
@@ -1275,13 +1561,15 @@ export async function publishFile(
     event_kind: event.event_kind,
     calendar_date: event.calendar_date,
     end_calendar_date: event.end_calendar_date,
+    date_precision: event.date_precision || data.date_precision || "exact",
+    date_granularity: event.date_granularity || data.date_granularity,
     header_image_url: event.header_image_url || "",
-    backdrop_updated_at: event.updated_at || syncedAt,
-    backdrop_synced_at: syncedAt,
+    backdrop_updated_at: remoteStamp,
+    backdrop_synced_at: alignedSync,
   };
   const next = buildNoteFile(fm, bodyWithMedia);
   await app.vault.modify(file, next);
-  settings.contentHashes[normalizePath(file.path)] = hashContent(next);
+  rememberSyncedHash(settings, file.path, next);
   clearConflictPath(settings, file.path);
   await saveSettings();
   new Notice(
@@ -1312,18 +1600,28 @@ export interface PublishCandidate {
   defaultChecked: boolean;
 }
 
+/** True when `path` is `folder` or a descendant (`folder/…`). */
+export function pathIsUnderFolder(path: string, folder: string): boolean {
+  const p = normalizePath(path);
+  const f = normalizePath(folder).replace(/\/+$/, "");
+  if (!f) return true;
+  return p === f || p.startsWith(`${f}/`);
+}
+
 /**
  * Notes under vault root that are candidates to push:
  * dirty vs last sync, unpublished (no backdrop_id), and/or conflict-flagged.
  * Optionally force-include a focus note even when clean.
+ * Optionally restrict to a folder (world / category / wiki / timeline tree).
  */
 export async function listPublishCandidates(
   app: App,
   settings: BackdropSettings,
-  opts: { includePath?: string } = {}
+  opts: { includePath?: string; underPath?: string } = {}
 ): Promise<PublishCandidate[]> {
   const root = settings.vaultRoot.replace(/\/+$/, "");
   const includeNorm = opts.includePath ? normalizePath(opts.includePath) : "";
+  const underNorm = opts.underPath ? normalizePath(opts.underPath).replace(/\/+$/, "") : "";
   const conflictSet = new Set((settings.conflictPaths || []).map((p) => normalizePath(p)));
   const out: PublishCandidate[] = [];
 
@@ -1332,6 +1630,7 @@ export async function listPublishCandidates(
     const underRoot = file.path.startsWith(`${root}/`) || file.path === root;
     const isFocus = includeNorm !== "" && path === includeNorm;
     if (!underRoot && !isFocus) continue;
+    if (underNorm && !pathIsUnderFolder(path, underNorm) && !isFocus) continue;
     const content = await app.vault.read(file);
     const { data } = splitFrontmatter(content);
     const typeRaw = String(data.backdrop_type || "");
@@ -1551,7 +1850,7 @@ export async function createWikiStub(
   const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
   if (folder) await ensureFolderPath(app, folder);
   const file = await app.vault.create(normalizePath(path), content);
-  settings.contentHashes[normalizePath(path)] = hashContent(content);
+  rememberSyncedHash(settings, path, content);
   return file;
 }
 
@@ -1573,6 +1872,7 @@ export async function createTimelineStub(
       event_kind: "major",
       calendar_date: { era: null, year: null, month: null, day: null },
       end_calendar_date: null,
+      date_precision: "exact",
       lane: "",
       era: "",
       header_image_url: "",
@@ -1583,6 +1883,6 @@ export async function createTimelineStub(
   const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
   if (folder) await ensureFolderPath(app, folder);
   const file = await app.vault.create(normalizePath(path), content);
-  settings.contentHashes[normalizePath(path)] = hashContent(content);
+  rememberSyncedHash(settings, path, content);
   return file;
 }

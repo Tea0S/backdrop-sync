@@ -101,58 +101,102 @@ export function splitFrontmatter(content: string): { fm: string; body: string; d
   return { fm: fmBlock, body, data };
 }
 
-/** Minimal YAML subset for our frontmatter keys. */
+function parseYamlScalar(raw: string): unknown {
+  const s = String(raw || "").trim();
+  if (s === "null") return null;
+  if (s === "true" || s === "false") return s === "true";
+  if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    try {
+      return JSON.parse(s.replace(/^'/, '"').replace(/'$/, '"'));
+    } catch {
+      return s.slice(1, -1);
+    }
+  }
+  if (s.startsWith("[") || s.startsWith("{")) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return s;
+    }
+  }
+  return s;
+}
+
+/**
+ * Minimal YAML subset for our frontmatter keys.
+ * Supports inline JSON objects and one-level indented maps (Obsidian Properties
+ * often rewrites `calendar_date: {...}` into a nested block).
+ */
 export function parseSimpleYaml(src: string): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const lines = src.split(/\r?\n/);
-  for (const line of lines) {
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    i += 1;
     if (!line.trim() || line.trim().startsWith("#")) continue;
     const m = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
     if (!m) continue;
     const key = m[1];
-    let raw = m[2].trim();
-    if (raw === "null") {
-      out[key] = null;
-      continue;
-    }
-    if (raw === "true" || raw === "false") {
-      out[key] = raw === "true";
-      continue;
-    }
-    if (/^-?\d+(\.\d+)?$/.test(raw)) {
-      out[key] = Number(raw);
-      continue;
-    }
-    if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
-      try {
-        const parsed: unknown = JSON.parse(raw.replace(/^'/, '"').replace(/'$/, '"'));
-        out[key] = parsed;
-      } catch {
-        out[key] = raw.slice(1, -1);
+    const raw = m[2].trim();
+    if (raw === "" || raw === "|" || raw === ">") {
+      const nested: Record<string, unknown> = {};
+      while (i < lines.length) {
+        const nl = lines[i];
+        if (!nl.trim() || nl.trim().startsWith("#")) {
+          i += 1;
+          continue;
+        }
+        const nm = nl.match(/^([ \t]+)([A-Za-z0-9_]+):\s*(.*)$/);
+        if (!nm) break;
+        nested[nm[2]] = parseYamlScalar(nm[3]);
+        i += 1;
       }
+      out[key] = Object.keys(nested).length ? nested : raw === "" ? "" : raw;
       continue;
     }
-    if (raw.startsWith("[") || raw.startsWith("{")) {
-      try {
-        const parsed: unknown = JSON.parse(raw);
-        out[key] = parsed;
-      } catch {
-        out[key] = raw;
-      }
-      continue;
-    }
-    out[key] = raw;
+    out[key] = parseYamlScalar(raw);
   }
   return out;
 }
 
-export function hashContent(content: string): string {
+/** Structured calendar date suitable to send to the API, or undefined to leave remote unchanged. */
+export function calendarDateForPublish(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  const era = o.era != null && String(o.era).trim() && String(o.era).trim() !== "null" ? String(o.era).trim() : "";
+  const year = Number.parseInt(String(o.year ?? ""), 10);
+  const month = Number.parseInt(String(o.month ?? ""), 10);
+  const day = Number.parseInt(String(o.day ?? ""), 10);
+  const y = Number.isFinite(year) ? year : 0;
+  const m = Number.isFinite(month) ? Math.max(0, month) : 0;
+  const d = Number.isFinite(day) ? Math.max(0, day) : 0;
+  if (!y && !m && !d && !era) return undefined;
+  return { era, year: y, month: m, day: d };
+}
+
+export function normalizeNewlines(text: string): string {
+  return String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function fnv1aHex(s: string): string {
   let h = 2166136261;
-  for (let i = 0; i < content.length; i++) {
-    h ^= content.charCodeAt(i);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
   return (h >>> 0).toString(16);
+}
+
+/** FNV-1a of newline-normalized text. */
+export function hashContent(content: string): string {
+  return fnv1aHex(normalizeNewlines(content));
+}
+
+/** Pre-0.1.31 hashes were FNV of the raw string (CRLF on disk never matched). */
+export function hashContentRaw(content: string): string {
+  return fnv1aHex(String(content || ""));
 }
 
 export function wikiFrontmatterFromArticle(
@@ -215,6 +259,8 @@ export function timelineFrontmatterFromEvent(
     event_kind: event.event_kind || "scene",
     calendar_date: event.calendar_date ?? null,
     end_calendar_date: event.end_calendar_date ?? null,
+    date_precision: event.date_precision || "exact",
+    date_granularity: event.date_granularity || undefined,
     lane: laneName || event.lane_id || "",
     era: eraName || event.era_id || "",
     header_image_url: event.header_image_url || "",

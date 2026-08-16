@@ -24,10 +24,16 @@ Ribbon **Sync to BackDrop**, **Sync current note**, **Sync all pending**, and Re
 
 1. Lists dirty, unpublished (no `backdrop_id`), and conflict notes under the vault root.
 2. Each row: title, world, type, local status dropdown, Discord toggle (wiki), and a **Dirty** / **New** / **Conflict** hint (plus whether local differs from the last sync hash).
-3. Checkboxes default on for dirty/unpublished/conflict; uncheck anything not ready.
+3. Checkboxes default on for dirty/unpublished/conflict; uncheck anything not ready. Conflict rows also get **Review…** / **Keep local** / **Take remote** so you can resolve without leaving the panel (pushing a conflict overwrites remote).
 4. **Push selected** uploads only checked notes sequentially (same rate-limit gap as before). **Cancel** closes with no push.
 5. Empty state: **Nothing to sync**.
 6. Opening from a single note pre-checks and highlights that note (even if clean). **Force sync current note** / Resolve force uses the same panel with force overwrite.
+
+**File explorer right-click**
+
+- On a BackDrop wiki/timeline note: **BackDrop: Sync to BackDrop…** (same panel, that note focused).
+- On a folder under the vault root (world, `wiki`/`timeline`, or a category folder): **BackDrop: Sync …** opens the panel **scoped to that folder only**, so you can push one world or one category without scanning everything else.
+- Editor right-click on a BackDrop note also offers **BackDrop: Sync to BackDrop…**.
 
 ## Wiki editor helpers
 
@@ -37,8 +43,8 @@ Ribbon **Sync to BackDrop**, **Sync current note**, **Sync all pending**, and Re
 | **Insert audio** | Same upload/path flow; inserts `[label](url)`. |
 | **Insert wikilink** | Fuzzy-search the wiki slug index by title; inserts `[[Note Title]]` or `[[Note Title\|label]]` when text was selected. |
 | **Article properties** | Status, category (with **New…** create), Publish to Discord (wiki, non-pin), characters, parent article, linked pins/regions, thumbnail (wiki) or header image (timeline). Categories/pins/regions come from the last pull cache. |
-| **Resolve sync…** | On conflict/dirty: side-by-side local vs remote. Keep local, take remote (force pull), or Sync local… (opens Sync panel with force). |
-| **Review sync conflicts** | Lists notes skipped as dirty on pull; open Resolve per note. |
+| **Resolve sync…** | Line-level local vs remote diff (unified or side-by-side), plus title/status/category. **Keep local**, **Take remote**, or **Push local…**. |
+| **Review sync conflicts** | Conflict list after pull. Per row: **Review…**, **Keep local**, **Take remote**. Bulk: **Keep all local** / **Take all remote**. |
 
 Pull caches each world’s categories, pins, regions, lanes, and eras in plugin data. On publish, pin/region ids, characters, parent, thumbnail, and `discord_sync_enabled` are sent when present.
 
@@ -49,7 +55,7 @@ Pulls respect the worlds checklist (wiki / timeline facets). If you turn every w
 | Action | Behavior |
 |--------|----------|
 | **Pull on startup** | Creates missing notes only; never overwrites existing files |
-| **Pull updates** (command / ribbon) | Creates missing; updates clean remote-newer notes; **never overwrites dirty/local draft work** — marks **Conflict** and opens the conflict list |
+| **Pull updates** (command / ribbon) | Creates missing notes; fast-forwards notes that match the last sync (or match remote). **Conflict** only when you edited a note locally *and* BackDrop changed it too. Unmodified notes are never flagged. |
 | **Pull current note** / Resolve → Take remote | Overwrites that note from the server (explicit) |
 
 Publish / Sync pushes selected notes to the API and **preserves (or overrides) frontmatter `status`** (`draft` / `unlisted` / `published`). Missing status defaults to `draft`. Sync does **not** mean “set published”.
