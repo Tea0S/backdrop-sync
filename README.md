@@ -8,7 +8,7 @@ Digital-garden style sync for BackDrop wiki and timeline articles.
 1. On [backdrop.quest](https://backdrop.quest) dashboard → **API keys** (vault sync) → Create key (copy once).
 2. In this repo: `npm install && npm run install:vault`
 3. Enable **BackDrop** under Community plugins (Roleplay Writing vault).
-4. Settings → BackDrop: paste API base (`https://api.backdrop.quest`) and your `bd_…` key. After the key is set, a **Worlds to sync** checklist loads from the API — enable wiki and/or timeline per world (disabled when you lack edit access). Leave the list untouched to pull all editable worlds; any toggle saves an explicit selection.
+4. Settings → BackDrop: set the API base (`https://api.backdrop.quest`) and save your `bd_…` key in the API key field. Obsidian stores it in the keychain, and an existing key is moved there the next time the plugin loads. After the key is set, a **Worlds to sync** checklist loads from the API — enable wiki and/or timeline per world (disabled when you lack edit access). Leave the list untouched to pull all editable worlds; any toggle saves an explicit selection.
 
 ## Editing bar
 

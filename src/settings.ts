@@ -2,6 +2,7 @@ import {
   App,
   ButtonComponent,
   PluginSettingTab,
+  SecretComponent,
   Setting,
   ToggleComponent,
   type SettingDefinitionItem,
@@ -41,23 +42,10 @@ export class BackdropSettingTab extends PluginSettingTab {
       },
       {
         name: "API key",
-        desc: "Create a bd_… key on the BackDrop dashboard (Obsidian API keys).",
-        aliases: ["token", "auth", "password"],
-        // Password input is not available on the declarative text control.
+        desc: "Saved in the Obsidian keychain. Create a bd_… key on the BackDrop dashboard (Obsidian API keys), or pick a secret you already saved.",
+        aliases: ["token", "auth", "password", "keychain", "secret"],
         render: (setting) => {
-          setting.addText((text) => {
-            text.inputEl.type = "password";
-            text
-              .setPlaceholder("bd_…")
-              .setValue(this.plugin.settings.apiKey)
-              .onChange(async (value) => {
-                this.plugin.settings.apiKey = value.trim();
-                await this.plugin.saveSettings();
-                this.worlds = null;
-                this.worldsError = "";
-                this.update();
-              });
-          });
+          this.mountApiKeySetting(setting);
         },
       },
       {
@@ -98,6 +86,28 @@ export class BackdropSettingTab extends PluginSettingTab {
     ];
   }
 
+  private mountApiKeySetting(setting: Setting): void {
+    setting.addComponent((el) => {
+      const field = new SecretComponent(this.app, el);
+      const current = this.plugin.settings.apiKey || "";
+      if (current) field.setValue(current);
+      field.onChange((value) => {
+        void this.onApiKeySecretChanged(value ?? "");
+      });
+      return field;
+    });
+  }
+
+  private async onApiKeySecretChanged(secretId: string): Promise<void> {
+    const nextId = secretId.trim();
+    if (nextId === (this.plugin.settings.apiKey || "").trim()) return;
+    this.plugin.settings.apiKey = nextId;
+    await this.plugin.saveSettings();
+    this.worlds = null;
+    this.worldsError = "";
+    this.update();
+  }
+
   async setControlValue(key: string, value: unknown): Promise<void> {
     let next: unknown = value;
     if (typeof value === "string") {
@@ -115,7 +125,7 @@ export class BackdropSettingTab extends PluginSettingTab {
 
     const host = setting.controlEl.createDiv({ cls: "bd-world-settings-host" });
 
-    const hasKey = Boolean(this.plugin.settings.apiKey.trim());
+    const hasKey = Boolean(this.plugin.getApiKey());
     if (!hasKey) {
       host.createEl("p", {
         text: "Set an API key above to load editable worlds.",

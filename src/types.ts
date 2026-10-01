@@ -21,6 +21,7 @@ export interface WorldCatalogMeta {
 
 export interface BackdropSettings {
   apiBaseUrl: string;
+  /** Obsidian keychain secret id. Older installs may still store the raw key until load migrates it. */
   apiKey: string;
   vaultRoot: string;
   /**

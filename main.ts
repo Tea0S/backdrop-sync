@@ -59,6 +59,7 @@ import {
 } from "./src/syncSelection";
 import { WikiSlugIndex, scanWikiSlugIndex } from "./src/wikiLinks";
 import { contentMatchesStoredHash, hashNoteForSync } from "./src/syncState";
+import { migratePlaintextToKeychain, readKeychainSecret } from "./src/secrets";
 
 export default class BackdropPlugin extends Plugin {
   settings: BackdropSettings = DEFAULT_SETTINGS;
@@ -77,7 +78,7 @@ export default class BackdropPlugin extends Plugin {
     if (healed) await this.saveSettings();
     this.client = new BackdropClient(
       () => this.settings.apiBaseUrl,
-      () => this.settings.apiKey
+      () => this.getApiKey()
     );
 
     this.addSettingTab(new BackdropSettingTab(this.app, this));
@@ -358,7 +359,7 @@ export default class BackdropPlugin extends Plugin {
       },
     });
 
-    if (this.settings.pullOnStartup && this.settings.apiKey) {
+    if (this.settings.pullOnStartup && this.getApiKey()) {
       window.setTimeout(() => {
         void pullAll(
           this.app,
@@ -398,6 +399,21 @@ export default class BackdropPlugin extends Plugin {
     if (migrateSyncWorldsFromSlugs(this.settings)) {
       await this.saveSettings();
     }
+    const migratedKey = migratePlaintextToKeychain(
+      this.app.secretStorage,
+      this.settings.apiKey,
+      "backdrop-api-key"
+    );
+    if (migratedKey !== this.settings.apiKey) {
+      this.settings.apiKey = migratedKey;
+      await this.saveSettings();
+      new Notice("BackDrop API key moved to the Obsidian keychain.");
+    }
+  }
+
+  /** Bearer token from the Obsidian keychain, or a legacy plaintext key. */
+  getApiKey(): string {
+    return readKeychainSecret(this.app.secretStorage, this.settings.apiKey);
   }
 
   async saveSettings() {
